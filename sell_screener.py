@@ -21,6 +21,21 @@ DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
 MARKET_REFERENCE_TICKER = "^GSPC"
 MARKET_LOOKBACK_DAYS = 320
 
+
+def format_quantity(value: object) -> str:
+    """Pretty-print a quantity value while keeping trailing zeros minimal."""
+
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if num.is_integer():
+        return str(int(num))
+
+    return format(num, "g")
+
+
 MARKET_PRESETS = {
     "Bullish": {
         "use_rsi": True,
@@ -402,7 +417,7 @@ class ScreenerApp(tk.Tk):
             cost = item.get("cost")
             qty = item.get("quantity")
             cost_text = "—" if cost is None else f"{cost:.2f}"
-            qty_text = "—" if qty is None else str(qty)
+            qty_text = "—" if qty in (None, "") else format_quantity(qty)
             display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text}"
             self.listbox.insert(tk.END, display)
 
@@ -423,11 +438,11 @@ class ScreenerApp(tk.Tk):
             return
 
         try:
-            quantity = int(qty_str)
+            quantity = float(qty_str)
             if quantity <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid quantity", "Quantity (board lots) must be a positive whole number.")
+            messagebox.showerror("Invalid quantity", "Quantity (lots) must be a positive number.")
             return
 
         updated = False
@@ -444,7 +459,9 @@ class ScreenerApp(tk.Tk):
         self.ticker_entry.delete(0, tk.END)
         self.cost_var.set("")
         self.qty_var.set("1")
-        self.status.set(f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({quantity} lots).")
+        self.status.set(
+            f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({format_quantity(quantity)} lots)."
+        )
 
     def remove_selected(self):
         sel = list(self.listbox.curselection())
@@ -480,7 +497,7 @@ class ScreenerApp(tk.Tk):
                 if not ticker or ticker == "TICKER":
                     continue
                 cost = float(row[1]) if len(row) > 1 and row[1].strip() else 0.0
-                quantity = int(float(row[2])) if len(row) > 2 and row[2].strip() else 1
+                quantity = float(row[2]) if len(row) > 2 and row[2].strip() else 1.0
                 loaded.append({"ticker": ticker, "cost": cost, "quantity": quantity})
         except ValueError:
             # Fallback: support legacy CSV that only listed tickers
@@ -489,7 +506,7 @@ class ScreenerApp(tk.Tk):
                 for cell in row:
                     ticker = cell.strip().upper()
                     if ticker and ticker != "TICKER":
-                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1})
+                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0})
 
         unique: dict[str, dict[str, object]] = {}
         for item in loaded:
@@ -629,7 +646,7 @@ class ScreenerApp(tk.Tk):
 
         price_text = "—" if price is None else f"{price:.2f}"
         cost_text = "—" if cost is None else f"{float(cost):.2f}"
-        qty_text = "—" if quantity in (None, "") else str(quantity)
+        qty_text = "—" if quantity in (None, "") else format_quantity(quantity)
 
         self.tree.insert(
             "",
