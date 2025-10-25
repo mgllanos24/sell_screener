@@ -253,8 +253,8 @@ index 583f293b988f32a3ca47600393404e50b739d5c8..811c16379ba3402954efec5f2be05e2d
 +    def __init__(self):
 +        super().__init__()
 +        self.title(APP_TITLE)
-+        self.geometry("980x640")
-+        self.minsize(900, 600)
++        self.geometry("900x560")
++        self.minsize(820, 520)
 +
 +        self.tickers = tk.StringVar(value="")
 +        self.queue = queue.Queue()
