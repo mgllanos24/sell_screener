@@ -388,9 +388,11 @@ class ScreenerApp(tk.Tk):
         container.grid_columnconfigure(0, weight=1)
 
         # color tags
-        self.tree.tag_configure("ready", foreground="#b00020")     # red-ish
-        self.tree.tag_configure("hold", foreground="#006400")       # green-ish
-        self.tree.tag_configure("warn", foreground="#8B8000")       # dark golden
+        self.tree.tag_configure("status_ready", background="#ffe5e9")   # light red tint
+        self.tree.tag_configure("status_hold", background="#e6f4ea")    # light green tint
+        self.tree.tag_configure("status_warn", background="#fff4ce")    # light golden tint
+        self.tree.tag_configure("gain_positive", foreground="#006400")  # green text
+        self.tree.tag_configure("gain_negative", foreground="#b00020")  # red text
 
     def _build_status(self):
         self.status = tk.StringVar(value="Add tickers and click Scan.")
@@ -643,13 +645,13 @@ class ScreenerApp(tk.Tk):
             sig_texts.append(f"{mark} {r['name']}{val}")
         sig_col = " | ".join(sig_texts) if sig_texts else "No rules evaluated"
 
-        tags = ()
+        tags: list[str] = []
         if res["status"].startswith("Ready"):
-            tags = ("ready",)
+            tags.append("status_ready")
         elif res["status"].startswith("Error"):
-            tags = ("warn",)
+            tags.append("status_warn")
         else:
-            tags = ("hold",)
+            tags.append("status_hold")
 
         price = res.get("price")
         cost = res.get("cost")
@@ -660,6 +662,7 @@ class ScreenerApp(tk.Tk):
         qty_text = "—" if quantity in (None, "") else format_quantity(quantity)
 
         gain_text = "—"
+        gain_value = None
         if price is not None and cost not in (None, ""):
             try:
                 cost_val = float(cost)
@@ -686,6 +689,7 @@ class ScreenerApp(tk.Tk):
                     total_cost = cost_val * qty_val
 
                 diff = price * qty_val - total_cost
+                gain_value = diff
                 pct = ((price - cost_per_unit) / cost_per_unit * 100.0) if cost_per_unit else None
 
                 sign_diff = "+" if diff >= 0 else ""
@@ -698,6 +702,12 @@ class ScreenerApp(tk.Tk):
                     gain_text = f"{diff_text} ({sign_pct}{pct:.2f}%)"
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
+
+        if gain_value is not None:
+            if gain_value > 0:
+                tags.append("gain_positive")
+            elif gain_value < 0:
+                tags.append("gain_negative")
 
         self.tree.insert(
             "",
