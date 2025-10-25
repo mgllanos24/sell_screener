@@ -287,23 +287,20 @@ class ScreenerApp(tk.Tk):
         ttk.Label(frm, text="Cost:").grid(row=0, column=2, sticky="e")
         self.cost_var = tk.StringVar()
         self.cost_entry = ttk.Entry(frm, textvariable=self.cost_var, width=10)
-        self.cost_entry.grid(row=0, column=3, padx=(4, 8))
+        self.cost_entry.grid(row=0, column=3, padx=(4, 12))
 
-        self.cost_is_total_var = tk.IntVar(value=0)
-        ttk.Checkbutton(frm, text="Cost is total", variable=self.cost_is_total_var).grid(row=0, column=4, sticky="w", padx=(0, 12))
-
-        ttk.Label(frm, text="Qty (lots):").grid(row=0, column=5, sticky="e")
+        ttk.Label(frm, text="Qty (lots):").grid(row=0, column=4, sticky="e")
         self.qty_var = tk.StringVar(value="1")
         self.qty_entry = ttk.Entry(frm, textvariable=self.qty_var, width=8)
-        self.qty_entry.grid(row=0, column=6, padx=(4, 12))
+        self.qty_entry.grid(row=0, column=5, padx=(4, 12))
 
-        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=7)
-        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=8, padx=(12, 0))
-        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=9, padx=(12, 0))
-        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=10, padx=(6, 0))
-        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=11, padx=(24, 0))
-        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=12, padx=(6, 0))
-        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=13, padx=(18, 0))
+        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=6)
+        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=7, padx=(12, 0))
+        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=8, padx=(12, 0))
+        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=9, padx=(6, 0))
+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=10, padx=(24, 0))
+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=11, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=12, padx=(18, 0))
 
         # Listbox of tickers
         self.listbox = tk.Listbox(frm, height=6, selectmode=tk.EXTENDED)
@@ -430,12 +427,7 @@ class ScreenerApp(tk.Tk):
         for item in self.watchlist:
             cost = item.get("cost")
             qty = item.get("quantity")
-            cost_mode = item.get("cost_is_total")
-            if cost is None:
-                cost_text = "—"
-            else:
-                suffix = " (total)" if cost_mode else " (per-unit)" if cost_mode is not None else ""
-                cost_text = f"{cost:.2f}{suffix}"
+            cost_text = "—" if cost is None else f"{cost:.2f}"
             qty_text = "—" if qty in (None, "") else format_quantity(qty)
             display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text}"
             self.listbox.insert(tk.END, display)
@@ -464,32 +456,22 @@ class ScreenerApp(tk.Tk):
             messagebox.showerror("Invalid quantity", "Quantity (lots) must be a positive number.")
             return
 
-        cost_is_total = bool(self.cost_is_total_var.get())
-
         updated = False
         for item in self.watchlist:
             if item["ticker"] == t:
                 item["cost"] = cost
                 item["quantity"] = quantity
-                item["cost_is_total"] = cost_is_total
                 updated = True
                 break
         if not updated:
-            self.watchlist.append({
-                "ticker": t,
-                "cost": cost,
-                "quantity": quantity,
-                "cost_is_total": cost_is_total,
-            })
+            self.watchlist.append({"ticker": t, "cost": cost, "quantity": quantity})
 
         self._refresh_watchlist()
         self.ticker_entry.delete(0, tk.END)
         self.cost_var.set("")
         self.qty_var.set("1")
-        self.cost_is_total_var.set(0)
-        mode_text = "total" if cost_is_total else "per-unit"
         self.status.set(
-            f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({mode_text}, {format_quantity(quantity)} lots)."
+            f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({format_quantity(quantity)} lots)."
         )
 
     def remove_selected(self):
@@ -527,19 +509,7 @@ class ScreenerApp(tk.Tk):
                     continue
                 cost = float(row[1]) if len(row) > 1 and row[1].strip() else 0.0
                 quantity = float(row[2]) if len(row) > 2 and row[2].strip() else 1.0
-                mode_raw = row[3].strip().lower() if len(row) > 3 else ""
-                if mode_raw in {"total", "t", "total_cost", "total amount"}:
-                    cost_is_total = True
-                elif mode_raw in {"per", "per-unit", "per_share", "per share", "share"}:
-                    cost_is_total = False
-                else:
-                    cost_is_total = None
-                loaded.append({
-                    "ticker": ticker,
-                    "cost": cost,
-                    "quantity": quantity,
-                    "cost_is_total": cost_is_total,
-                })
+                loaded.append({"ticker": ticker, "cost": cost, "quantity": quantity})
         except ValueError:
             # Fallback: support legacy CSV that only listed tickers
             loaded = []
@@ -547,7 +517,7 @@ class ScreenerApp(tk.Tk):
                 for cell in row:
                     ticker = cell.strip().upper()
                     if ticker and ticker != "TICKER":
-                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0, "cost_is_total": None})
+                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0})
 
         unique: dict[str, dict[str, object]] = {}
         for item in loaded:
@@ -564,16 +534,9 @@ class ScreenerApp(tk.Tk):
         try:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Ticker", "Cost", "Quantity (lots)", "Cost Mode"])
+                writer.writerow(["Ticker", "Cost", "Quantity (lots)"])
                 for item in self.watchlist:
-                    mode = item.get("cost_is_total")
-                    if mode is True:
-                        mode_str = "total"
-                    elif mode is False:
-                        mode_str = "per-unit"
-                    else:
-                        mode_str = ""
-                    writer.writerow([item["ticker"], item["cost"], item["quantity"], mode_str])
+                    writer.writerow([item["ticker"], item["cost"], item["quantity"]])
             self.status.set(f"Saved {len(self.watchlist)} tickers.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save CSV:\n{e}")
@@ -613,11 +576,7 @@ class ScreenerApp(tk.Tk):
         def worker():
             for item in watchlist:
                 res = evaluate_ticker(item["ticker"], config)
-                res.update({
-                    "cost": item.get("cost"),
-                    "quantity": item.get("quantity"),
-                    "cost_is_total": item.get("cost_is_total"),
-                })
+                res.update({"cost": item.get("cost"), "quantity": item.get("quantity")})
                 self.queue.put(res)
             self.queue.put("__DONE__")
 
@@ -695,25 +654,12 @@ class ScreenerApp(tk.Tk):
         price = res.get("price")
         cost = res.get("cost")
         quantity = res.get("quantity")
-        raw_mode = res.get("cost_is_total")
-        if isinstance(raw_mode, str):
-            lowered = raw_mode.lower()
-            if lowered in {"total", "t", "total_cost", "total amount"}:
-                cost_is_total = True
-            elif lowered in {"per", "per-unit", "per_share", "per share", "share"}:
-                cost_is_total = False
-            else:
-                cost_is_total = None
-        elif raw_mode is None:
-            cost_is_total = None
-        else:
-            cost_is_total = bool(raw_mode)
 
         price_text = "—" if price is None else f"{price:.2f}"
+        cost_text = "—" if cost is None else f"{float(cost):.2f}"
         qty_text = "—" if quantity in (None, "") else format_quantity(quantity)
 
         gain_text = "—"
-        display_mode = cost_is_total
         if price is not None and cost not in (None, ""):
             try:
                 cost_val = float(cost)
@@ -722,22 +668,22 @@ class ScreenerApp(tk.Tk):
                 if qty_val <= 0:
                     qty_val = 1.0
 
-                per_unit_assuming_total = cost_val / qty_val if qty_val else cost_val
+                # Detect whether the provided cost looks like a per-unit or total
+                # cost basis. When the absolute difference between the entered cost
+                # and the current price is larger than the difference between the
+                # inferred per-unit cost (cost / qty) and the current price, we
+                # treat the input as a total cost basis. This allows users to enter
+                # either total or per-unit costs without needing an explicit toggle.
+                per_unit_assuming_total = cost_val / qty_val
+                diff_per_share = abs(cost_val - price)
+                diff_assuming_total = abs(per_unit_assuming_total - price)
 
-                if cost_is_total is None:
-                    # Legacy heuristic for watchlists without an explicit mode flag
-                    diff_per_share = abs(cost_val - price)
-                    diff_assuming_total = abs(per_unit_assuming_total - price)
-                    cost_is_total = qty_val > 0 and diff_assuming_total < diff_per_share
-
-                if cost_is_total:
+                if qty_val > 0 and diff_assuming_total < diff_per_share:
                     total_cost = cost_val
                     cost_per_unit = per_unit_assuming_total
                 else:
                     cost_per_unit = cost_val
                     total_cost = cost_val * qty_val
-
-                display_mode = cost_is_total
 
                 diff = price * qty_val - total_cost
                 pct = ((price - cost_per_unit) / cost_per_unit * 100.0) if cost_per_unit else None
@@ -752,12 +698,6 @@ class ScreenerApp(tk.Tk):
                     gain_text = f"{diff_text} ({sign_pct}{pct:.2f}%)"
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
-
-        if cost is None:
-            cost_text = "—"
-        else:
-            suffix = " (total)" if display_mode else " (per-unit)" if display_mode is not None else ""
-            cost_text = f"{float(cost):.2f}{suffix}"
 
         self.tree.insert(
             "",
@@ -784,7 +724,6 @@ class ScreenerApp(tk.Tk):
             "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
             "Tips:\n"
             "• Use CSV to save/load your watchlist.\n"
-            "• Check 'Cost is total' when your cost entry already includes the whole position.\n"
             "• Signals are heuristics, not advice. Always research before acting."
         )
         messagebox.showinfo("Help", msg)
