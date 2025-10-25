@@ -655,8 +655,29 @@ class ScreenerApp(tk.Tk):
             try:
                 cost_val = float(cost)
                 qty_val = float(quantity) if quantity not in (None, "") else 1.0
-                diff = (price - cost_val) * qty_val
-                pct = ((price - cost_val) / cost_val * 100.0) if cost_val else None
+
+                if qty_val <= 0:
+                    qty_val = 1.0
+
+                # Detect whether the provided cost looks like a per-unit or total
+                # cost basis. When the absolute difference between the entered cost
+                # and the current price is larger than the difference between the
+                # inferred per-unit cost (cost / qty) and the current price, we
+                # treat the input as a total cost basis. This allows users to enter
+                # either total or per-unit costs without needing an explicit toggle.
+                per_unit_assuming_total = cost_val / qty_val
+                diff_per_share = abs(cost_val - price)
+                diff_assuming_total = abs(per_unit_assuming_total - price)
+
+                if qty_val > 0 and diff_assuming_total < diff_per_share:
+                    total_cost = cost_val
+                    cost_per_unit = per_unit_assuming_total
+                else:
+                    cost_per_unit = cost_val
+                    total_cost = cost_val * qty_val
+
+                diff = price * qty_val - total_cost
+                pct = ((price - cost_per_unit) / cost_per_unit * 100.0) if cost_per_unit else None
 
                 sign_diff = "+" if diff >= 0 else ""
                 diff_text = f"{sign_diff}{diff:.2f}"
@@ -666,7 +687,7 @@ class ScreenerApp(tk.Tk):
                 else:
                     sign_pct = "+" if pct >= 0 else ""
                     gain_text = f"{diff_text} ({sign_pct}{pct:.2f}%)"
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, ZeroDivisionError):
                 pass
 
         self.tree.insert(
