@@ -234,7 +234,7 @@ class ScreenerApp(tk.Tk):
         self.geometry("900x560")
         self.minsize(820, 520)
 
-        self.tickers = tk.StringVar(value="")
+        self.watchlist: list[dict[str, object]] = []
         self.queue = queue.Queue()
         self.market_condition_var = tk.StringVar(value="Market: Checking…")
 
@@ -262,27 +262,39 @@ class ScreenerApp(tk.Tk):
         frm.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
 
         # Watchlist entry
-        ttk.Label(frm, text="Add ticker:").grid(row=0, column=0, sticky="w")
-        self.ticker_entry = ttk.Entry(frm, width=14)
-        self.ticker_entry.grid(row=0, column=1, padx=(4, 12))
-        ttk.Button(frm, text="Add", command=self.add_ticker).grid(row=0, column=2)
-        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=3, padx=(12, 0))
-        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=4, padx=(12, 0))
-        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=5, padx=(6, 0))
-        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=6, padx=(24, 0))
-        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=7, padx=(6, 0))
-        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=8, padx=(18, 0))
+        ttk.Label(frm, text="Ticker:").grid(row=0, column=0, sticky="w")
+        self.ticker_entry = ttk.Entry(frm, width=12)
+        self.ticker_entry.grid(row=0, column=1, padx=(4, 8))
+
+        ttk.Label(frm, text="Cost:").grid(row=0, column=2, sticky="e")
+        self.cost_var = tk.StringVar()
+        self.cost_entry = ttk.Entry(frm, textvariable=self.cost_var, width=10)
+        self.cost_entry.grid(row=0, column=3, padx=(4, 12))
+
+        ttk.Label(frm, text="Qty (lots):").grid(row=0, column=4, sticky="e")
+        self.qty_var = tk.StringVar(value="1")
+        self.qty_entry = ttk.Entry(frm, textvariable=self.qty_var, width=8)
+        self.qty_entry.grid(row=0, column=5, padx=(4, 12))
+
+        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=6)
+        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=7, padx=(12, 0))
+        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=8, padx=(12, 0))
+        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=9, padx=(6, 0))
+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=10, padx=(24, 0))
+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=11, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=12, padx=(18, 0))
 
         # Listbox of tickers
-        self.listbox = tk.Listbox(frm, listvariable=self.tickers, height=6, selectmode=tk.EXTENDED)
-        self.listbox.grid(row=1, column=0, columnspan=3, padx=(0, 12), pady=(8, 0), sticky="nsew")
+        self.listbox = tk.Listbox(frm, height=6, selectmode=tk.EXTENDED)
+        self.listbox.grid(row=1, column=0, columnspan=6, padx=(0, 12), pady=(8, 0), sticky="nsew")
         frm.grid_columnconfigure(1, weight=1)
+        frm.grid_columnconfigure(5, weight=1)
 
-        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=9, sticky="w", pady=(8, 0))
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=13, sticky="w", pady=(8, 0))
 
         # Rules panel
         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
-        rules.grid(row=1, column=3, columnspan=5, sticky="nsew", pady=(8, 0))
+        rules.grid(row=1, column=6, columnspan=7, sticky="nsew", pady=(8, 0))
         for c in range(5):
             rules.grid_columnconfigure(c, weight=1)
 
@@ -326,17 +338,21 @@ class ScreenerApp(tk.Tk):
         container = ttk.Frame(self)
         container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
 
-        columns = ("ticker", "price", "status", "signals")
+        columns = ("ticker", "price", "cost", "quantity", "status", "signals")
         self.tree = ttk.Treeview(container, columns=columns, show="headings")
         self.tree.heading("ticker", text="Ticker")
         self.tree.heading("price", text="Last Price")
+        self.tree.heading("cost", text="Cost Basis")
+        self.tree.heading("quantity", text="Qty (lots)")
         self.tree.heading("status", text="Result")
         self.tree.heading("signals", text="Signals / Values")
 
         self.tree.column("ticker", width=100, anchor=tk.CENTER)
         self.tree.column("price", width=110, anchor=tk.E)
+        self.tree.column("cost", width=110, anchor=tk.E)
+        self.tree.column("quantity", width=110, anchor=tk.CENTER)
         self.tree.column("status", width=150, anchor=tk.CENTER)
-        self.tree.column("signals", width=600, anchor=tk.W)
+        self.tree.column("signals", width=520, anchor=tk.W)
 
         vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=vsb.set)
@@ -380,19 +396,68 @@ class ScreenerApp(tk.Tk):
         except Exception as exc:
             self.queue.put({"type": "MARKET_ERROR", "error": str(exc), "apply": apply_preset})
 
+    def _refresh_watchlist(self):
+        self.listbox.delete(0, tk.END)
+        for item in self.watchlist:
+            cost = item.get("cost")
+            qty = item.get("quantity")
+            cost_text = "—" if cost is None else f"{cost:.2f}"
+            qty_text = "—" if qty is None else str(qty)
+            display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text}"
+            self.listbox.insert(tk.END, display)
+
     def add_ticker(self):
         t = self.ticker_entry.get().strip().upper()
         if not t:
             return
-        current = list(self.listbox.get(0, tk.END))
-        if t not in current:
-            self.listbox.insert(tk.END, t)
-            self.ticker_entry.delete(0, tk.END)
+
+        cost_str = self.cost_var.get().strip()
+        qty_str = self.qty_var.get().strip()
+
+        try:
+            cost = float(cost_str)
+            if cost < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid cost", "Please enter a valid non-negative cost basis.")
+            return
+
+        try:
+            quantity = int(qty_str)
+            if quantity <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid quantity", "Quantity (board lots) must be a positive whole number.")
+            return
+
+        updated = False
+        for item in self.watchlist:
+            if item["ticker"] == t:
+                item["cost"] = cost
+                item["quantity"] = quantity
+                updated = True
+                break
+        if not updated:
+            self.watchlist.append({"ticker": t, "cost": cost, "quantity": quantity})
+
+        self._refresh_watchlist()
+        self.ticker_entry.delete(0, tk.END)
+        self.cost_var.set("")
+        self.qty_var.set("1")
+        self.status.set(f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({quantity} lots).")
 
     def remove_selected(self):
         sel = list(self.listbox.curselection())
+        if not sel:
+            return
         for idx in reversed(sel):
-            self.listbox.delete(idx)
+            if 0 <= idx < len(self.watchlist):
+                self.watchlist.pop(idx)
+        self._refresh_watchlist()
+        if sel:
+            removed = len(sel)
+            plural = "s" if removed > 1 else ""
+            self.status.set(f"Removed {removed} ticker{plural}.")
 
     def load_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
@@ -400,27 +465,51 @@ class ScreenerApp(tk.Tk):
             return
         try:
             with open(path, newline="") as f:
-                reader = csv.reader(f)
-                tickers = []
-                for row in reader:
-                    tickers.extend([c.strip().upper() for c in row if c.strip()])
-            self.listbox.delete(0, tk.END)
-            for t in sorted(set(tickers)):
-                self.listbox.insert(tk.END, t)
-            self.status.set(f"Loaded {len(tickers)} tickers.")
+                rows = list(csv.reader(f))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load CSV:\n{e}")
+            return
+
+        loaded: list[dict[str, object]] = []
+
+        try:
+            for row in rows:
+                if not row:
+                    continue
+                ticker = row[0].strip().upper()
+                if not ticker or ticker == "TICKER":
+                    continue
+                cost = float(row[1]) if len(row) > 1 and row[1].strip() else 0.0
+                quantity = int(float(row[2])) if len(row) > 2 and row[2].strip() else 1
+                loaded.append({"ticker": ticker, "cost": cost, "quantity": quantity})
+        except ValueError:
+            # Fallback: support legacy CSV that only listed tickers
+            loaded = []
+            for row in rows:
+                for cell in row:
+                    ticker = cell.strip().upper()
+                    if ticker and ticker != "TICKER":
+                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1})
+
+        unique: dict[str, dict[str, object]] = {}
+        for item in loaded:
+            unique[item["ticker"]] = item
+
+        self.watchlist = list(unique.values())
+        self._refresh_watchlist()
+        self.status.set(f"Loaded {len(self.watchlist)} tickers.")
 
     def save_csv(self):
         path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if not path:
             return
         try:
-            items = list(self.listbox.get(0, tk.END))
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(items)
-            self.status.set(f"Saved {len(items)} tickers.")
+                writer.writerow(["Ticker", "Cost", "Quantity (lots)"])
+                for item in self.watchlist:
+                    writer.writerow([item["ticker"], item["cost"], item["quantity"]])
+            self.status.set(f"Saved {len(self.watchlist)} tickers.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save CSV:\n{e}")
 
@@ -447,8 +536,8 @@ class ScreenerApp(tk.Tk):
         }
 
     def scan(self):
-        tickers = list(self.listbox.get(0, tk.END))
-        if not tickers:
+        watchlist = [dict(item) for item in self.watchlist]
+        if not watchlist:
             messagebox.showinfo("No tickers", "Add one or more tickers first.")
             return
 
@@ -457,8 +546,9 @@ class ScreenerApp(tk.Tk):
         self.status.set("Scanning…")
 
         def worker():
-            for t in tickers:
-                res = evaluate_ticker(t, config)
+            for item in watchlist:
+                res = evaluate_ticker(item["ticker"], config)
+                res.update({"cost": item.get("cost"), "quantity": item.get("quantity")})
                 self.queue.put(res)
             self.queue.put("__DONE__")
 
@@ -533,7 +623,20 @@ class ScreenerApp(tk.Tk):
         else:
             tags = ("hold",)
 
-        self.tree.insert("", tk.END, values=(res["ticker"], res["price"], res["status"], sig_col), tags=tags)
+        price = res.get("price")
+        cost = res.get("cost")
+        quantity = res.get("quantity")
+
+        price_text = "—" if price is None else f"{price:.2f}"
+        cost_text = "—" if cost is None else f"{float(cost):.2f}"
+        qty_text = "—" if quantity in (None, "") else str(quantity)
+
+        self.tree.insert(
+            "",
+            tk.END,
+            values=(res["ticker"], price_text, cost_text, qty_text, res["status"], sig_col),
+            tags=tags,
+        )
 
     def show_help(self):
         msg = (
