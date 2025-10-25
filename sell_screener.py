@@ -567,18 +567,11 @@ def evaluate_ticker(ticker: str, config: dict, overrides: dict | None = None) ->
         if atr_value is not None and last_close != 0:
             atr_percent = atr_value / last_close
 
-        override_multiplier = None
         override_quantity = None
         if overrides:
-            override_multiplier = overrides.get("atr_multiplier")
             override_quantity = overrides.get("quantity")
 
         atr_multiple = config.get("atr_multiple", 3.0)
-        try:
-            if override_multiplier not in (None, ""):
-                atr_multiple = float(override_multiplier)
-        except (TypeError, ValueError):
-            atr_multiple = config.get("atr_multiple", 3.0)
         if atr_multiple <= 0:
             atr_multiple = config.get("atr_multiple", 3.0) or 1.0
 
@@ -748,28 +741,22 @@ class ScreenerApp(tk.Tk):
         self.qty_entry = ttk.Entry(frm, textvariable=self.qty_var, width=8)
         self.qty_entry.grid(row=0, column=5, padx=(4, 12))
 
-        ttk.Label(frm, text="ATR× override:").grid(row=0, column=6, sticky="e")
-        self.atr_factor_var = tk.StringVar()
-        self.atr_factor_entry = ttk.Entry(frm, textvariable=self.atr_factor_var, width=6)
-        self.atr_factor_entry.grid(row=0, column=7, padx=(4, 12))
-
-        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=8)
-        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=9, padx=(12, 0))
-        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=10, padx=(12, 0))
-        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=11, padx=(6, 0))
-        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=12, padx=(24, 0))
-        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=13, padx=(6, 0))
-        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=14, padx=(18, 0))
-        ttk.Button(frm, text="Restore Default Settings", command=self.restore_default_settings).grid(row=0, column=15, padx=(6, 0))
+        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=6)
+        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=7, padx=(12, 0))
+        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=8, padx=(12, 0))
+        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=9, padx=(6, 0))
+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=10, padx=(24, 0))
+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=11, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=12, padx=(18, 0))
+        ttk.Button(frm, text="Restore Default Settings", command=self.restore_default_settings).grid(row=0, column=13, padx=(6, 0))
 
         # Listbox of tickers
         self.listbox = tk.Listbox(frm, height=6, selectmode=tk.EXTENDED)
-        self.listbox.grid(row=1, column=0, columnspan=7, padx=(0, 12), pady=(8, 0), sticky="nsew")
+        self.listbox.grid(row=1, column=0, columnspan=6, padx=(0, 12), pady=(8, 0), sticky="nsew")
         frm.grid_columnconfigure(1, weight=1)
         frm.grid_columnconfigure(5, weight=1)
-        frm.grid_columnconfigure(7, weight=1)
 
-        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=16, sticky="w", pady=(8, 0))
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=14, sticky="w", pady=(8, 0))
 
         # Rules panel
         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
@@ -959,17 +946,9 @@ class ScreenerApp(tk.Tk):
         for item in self.watchlist:
             cost = item.get("cost")
             qty = item.get("quantity")
-            atr_override = item.get("atr_multiplier")
             cost_text = "—" if cost is None else f"{cost:.2f}"
             qty_text = "—" if qty in (None, "") else format_quantity(qty)
-            if atr_override in (None, ""):
-                atr_text = "—"
-            else:
-                try:
-                    atr_text = f"{float(atr_override):g}×"
-                except (TypeError, ValueError):
-                    atr_text = str(atr_override)
-            display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text} | ATR×: {atr_text}"
+            display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text}"
             self.listbox.insert(tk.END, display)
 
     def add_ticker(self):
@@ -979,7 +958,6 @@ class ScreenerApp(tk.Tk):
 
         cost_str = self.cost_var.get().strip()
         qty_str = self.qty_var.get().strip()
-        atr_factor_str = self.atr_factor_var.get().strip()
 
         try:
             cost = float(cost_str)
@@ -997,22 +975,11 @@ class ScreenerApp(tk.Tk):
             messagebox.showerror("Invalid quantity", "Quantity (lots) must be a positive number.")
             return
 
-        atr_factor = None
-        if atr_factor_str:
-            try:
-                atr_factor = float(atr_factor_str)
-                if atr_factor <= 0:
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror("Invalid ATR×", "ATR override must be a positive number (or leave blank).")
-                return
-
         updated = False
         for item in self.watchlist:
             if item["ticker"] == t:
                 item["cost"] = cost
                 item["quantity"] = quantity
-                item["atr_multiplier"] = atr_factor
                 updated = True
                 break
         if not updated:
@@ -1020,17 +987,14 @@ class ScreenerApp(tk.Tk):
                 "ticker": t,
                 "cost": cost,
                 "quantity": quantity,
-                "atr_multiplier": atr_factor,
             })
 
         self._refresh_watchlist()
         self.ticker_entry.delete(0, tk.END)
         self.cost_var.set("")
         self.qty_var.set("1")
-        self.atr_factor_var.set("")
         self.status.set(
             f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({format_quantity(quantity)} lots)"
-            + (f", ATR× {atr_factor:g}" if atr_factor else "")
             + "."
         )
 
@@ -1069,17 +1033,10 @@ class ScreenerApp(tk.Tk):
                     continue
                 cost = float(row[1]) if len(row) > 1 and row[1].strip() else 0.0
                 quantity = float(row[2]) if len(row) > 2 and row[2].strip() else 1.0
-                atr_multiplier = None
-                if len(row) > 3 and row[3].strip():
-                    try:
-                        atr_multiplier = float(row[3])
-                    except ValueError:
-                        atr_multiplier = None
                 loaded.append({
                     "ticker": ticker,
                     "cost": cost,
                     "quantity": quantity,
-                    "atr_multiplier": atr_multiplier,
                 })
         except ValueError:
             # Fallback: support legacy CSV that only listed tickers
@@ -1088,7 +1045,7 @@ class ScreenerApp(tk.Tk):
                 for cell in row:
                     ticker = cell.strip().upper()
                     if ticker and ticker != "TICKER":
-                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0, "atr_multiplier": None})
+                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0})
 
         unique: dict[str, dict[str, object]] = {}
         for item in loaded:
@@ -1105,21 +1062,12 @@ class ScreenerApp(tk.Tk):
         try:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Ticker", "Cost", "Quantity (lots)", "ATR Multiplier"])
+                writer.writerow(["Ticker", "Cost", "Quantity (lots)"])
                 for item in self.watchlist:
-                    atr_value = item.get("atr_multiplier")
-                    if atr_value in (None, ""):
-                        atr_cell = ""
-                    else:
-                        if isinstance(atr_value, (int, float)):
-                            atr_cell = f"{atr_value:g}"
-                        else:
-                            atr_cell = atr_value
                     writer.writerow([
                         item["ticker"],
                         item["cost"],
                         item["quantity"],
-                        atr_cell,
                     ])
             self.status.set(f"Saved {len(self.watchlist)} tickers.")
         except Exception as e:
@@ -1402,7 +1350,6 @@ class ScreenerApp(tk.Tk):
             "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
             "Tips:\n"
             "• Use CSV to save/load your watchlist.\n"
-            "• Override ATR× per ticker when you need looser/tighter stops for high- or low-beta names.\n"
             "• The Risk Sizing column suggests trims using ATR-based stop distance versus your risk target.\n"
             "• Signals are heuristics, not advice. Always research before acting."
         )
