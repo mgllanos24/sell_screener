@@ -18,6 +18,47 @@ except ImportError:
 
 APP_TITLE = "Sell Signal Screener"
 DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
+MARKET_REFERENCE_TICKER = "^GSPC"
+MARKET_LOOKBACK_DAYS = 320
+
+MARKET_PRESETS = {
+    "Bullish": {
+        "use_rsi": True,
+        "rsi_threshold": 75,
+        "use_ma": True,
+        "ma_fast": 12,
+        "ma_slow": 40,
+        "use_dd": False,
+        "drawdown_pct": 12.5,
+        "use_atr": True,
+        "atr_multiple": 3.5,
+        "min_triggers": 2,
+    },
+    "Sideways": {
+        "use_rsi": True,
+        "rsi_threshold": 70,
+        "use_ma": True,
+        "ma_fast": 18,
+        "ma_slow": 45,
+        "use_dd": True,
+        "drawdown_pct": 15.0,
+        "use_atr": True,
+        "atr_multiple": 3.0,
+        "min_triggers": 2,
+    },
+    "Bearish": {
+        "use_rsi": True,
+        "rsi_threshold": 60,
+        "use_ma": True,
+        "ma_fast": 20,
+        "ma_slow": 50,
+        "use_dd": True,
+        "drawdown_pct": 10.0,
+        "use_atr": True,
+        "atr_multiple": 2.5,
+        "min_triggers": 1,
+    },
+}
 
 # ---------- Indicator helpers ----------
 
@@ -107,6 +148,41 @@ def fetch_history(ticker: str, period_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.D
     df = df.dropna()
     return df
 
+
+def determine_market_condition() -> tuple[str, str]:
+    """Classify the broad market as Bullish, Sideways, or Bearish."""
+
+    df = fetch_history(MARKET_REFERENCE_TICKER, MARKET_LOOKBACK_DAYS)
+    if df.empty or len(df) < 220:
+        raise ValueError("Not enough data to determine market condition")
+
+    close = df["Close"]
+    sma50 = sma(close, 50)
+    sma200 = sma(close, 200)
+
+    latest_close = float(close.iloc[-1])
+    latest_sma50 = float(sma50.iloc[-1])
+    latest_sma200 = float(sma200.iloc[-1])
+
+    if np.isnan(latest_sma50) or np.isnan(latest_sma200):
+        raise ValueError("Not enough data for moving averages")
+
+    ratio_to_200 = latest_close / latest_sma200
+    sma50_20_ago = float(sma50.iloc[-20]) if not np.isnan(sma50.iloc[-20]) else latest_sma50
+    slope = (latest_sma50 - sma50_20_ago) / sma50_20_ago if sma50_20_ago else 0.0
+
+    if latest_close > latest_sma200 and latest_sma50 >= latest_sma200 and slope >= 0:
+        condition = "Bullish"
+    elif latest_close < latest_sma200 and latest_sma50 <= latest_sma200 and slope <= 0:
+        condition = "Bearish"
+    else:
+        condition = "Sideways"
+
+    pct_to_200 = (ratio_to_200 - 1.0) * 100.0
+    slope_pct = slope * 100.0
+    detail = f"Close vs SMA200: {pct_to_200:+.2f}% | SMA50 slope (20d): {slope_pct:+.2f}%"
+    return condition, detail
+
 # ---------- Screening logic ----------
 
 def evaluate_ticker(ticker: str, config: dict) -> dict:
@@ -160,6 +236,7 @@ class ScreenerApp(tk.Tk):
 
         self.tickers = tk.StringVar(value="")
         self.queue = queue.Queue()
+        self.market_condition_var = tk.StringVar(value="Market: Checking…")
 
         self._build_controls()
         self._build_table()
@@ -178,6 +255,7 @@ class ScreenerApp(tk.Tk):
         self.min_triggers_var.set(1)
 
         self.after(200, self._poll_queue)
+        self.refresh_market_condition()
 
     def _build_controls(self):
         frm = ttk.LabelFrame(self, text="Watchlist & Rules", padding=10)
@@ -193,11 +271,14 @@ class ScreenerApp(tk.Tk):
         ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=5, padx=(6, 0))
         ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=6, padx=(24, 0))
         ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=7, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=8, padx=(18, 0))
 
         # Listbox of tickers
         self.listbox = tk.Listbox(frm, listvariable=self.tickers, height=6, selectmode=tk.EXTENDED)
         self.listbox.grid(row=1, column=0, columnspan=3, padx=(0, 12), pady=(8, 0), sticky="nsew")
         frm.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=9, sticky="w", pady=(8, 0))
 
         # Rules panel
         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
@@ -275,6 +356,27 @@ class ScreenerApp(tk.Tk):
         bar.pack(fill=tk.X, padx=10, pady=(0,10))
 
     # ---------- Actions ----------
+
+    def refresh_market_condition(self):
+        self.market_condition_var.set("Market: Checking…")
+        threading.Thread(target=self._fetch_market_condition, args=(False,), daemon=True).start()
+
+    def auto_adjust_to_market(self):
+        self.status.set("Detecting market condition…")
+        self.market_condition_var.set("Market: Checking…")
+        threading.Thread(target=self._fetch_market_condition, args=(True,), daemon=True).start()
+
+    def _fetch_market_condition(self, apply_preset: bool):
+        try:
+            condition, detail = determine_market_condition()
+            self.queue.put({
+                "type": "MARKET",
+                "condition": condition,
+                "detail": detail,
+                "apply": apply_preset,
+            })
+        except Exception as exc:
+            self.queue.put({"type": "MARKET_ERROR", "error": str(exc), "apply": apply_preset})
 
     def add_ticker(self):
         t = self.ticker_entry.get().strip().upper()
@@ -367,6 +469,12 @@ class ScreenerApp(tk.Tk):
                 if item == "__DONE__":
                     self.status.set("Scan complete.")
                     break
+                if isinstance(item, dict) and item.get("type") == "MARKET":
+                    self._handle_market_message(item)
+                    continue
+                if isinstance(item, dict) and item.get("type") == "MARKET_ERROR":
+                    self._handle_market_error(item)
+                    continue
                 self._add_result_row(item)
         except queue.Empty:
             pass
@@ -390,6 +498,40 @@ class ScreenerApp(tk.Tk):
             tags = ("hold",)
 
         self.tree.insert("", tk.END, values=(res["ticker"], res["price"], res["status"], sig_col), tags=tags)
+
+    def _apply_market_preset(self, condition: str):
+        preset = MARKET_PRESETS.get(condition)
+        if not preset:
+            return
+
+        self.use_rsi_var.set(int(preset["use_rsi"]))
+        self.rsi_thr_var.set(int(preset["rsi_threshold"]))
+        self.use_ma_var.set(int(preset["use_ma"]))
+        self.fast_var.set(int(preset["ma_fast"]))
+        self.slow_var.set(int(preset["ma_slow"]))
+        self.use_dd_var.set(int(preset["use_dd"]))
+        self.dd_var.set(float(preset["drawdown_pct"]))
+        self.use_atr_var.set(int(preset["use_atr"]))
+        self.atr_var.set(float(preset["atr_multiple"]))
+        self.min_triggers_var.set(int(preset["min_triggers"]))
+
+    def _handle_market_message(self, item: dict):
+        condition = item["condition"]
+        detail = item["detail"]
+        apply = item["apply"]
+        self.market_condition_var.set(f"Market: {condition} — {detail}")
+        if apply:
+            self._apply_market_preset(condition)
+            self.status.set(f"Applied {condition} preset based on market condition.")
+        else:
+            self.status.set("Market condition updated.")
+
+    def _handle_market_error(self, item: dict):
+        self.market_condition_var.set("Market: Unable to determine (see status)")
+        if item.get("apply"):
+            self.status.set(f"Failed to auto-adjust: {item.get('error')}")
+        else:
+            self.status.set(f"Failed to refresh market info: {item.get('error')}")
 
     def show_help(self):
         msg = (
