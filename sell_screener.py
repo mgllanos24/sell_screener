@@ -353,12 +353,13 @@ class ScreenerApp(tk.Tk):
         container = ttk.Frame(self)
         container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
 
-        columns = ("ticker", "price", "cost", "quantity", "status", "signals")
+        columns = ("ticker", "price", "cost", "quantity", "gain_loss", "status", "signals")
         self.tree = ttk.Treeview(container, columns=columns, show="headings")
         self.tree.heading("ticker", text="Ticker")
         self.tree.heading("price", text="Last Price")
         self.tree.heading("cost", text="Cost Basis")
         self.tree.heading("quantity", text="Qty (lots)")
+        self.tree.heading("gain_loss", text="Gain / Loss ($, %)")
         self.tree.heading("status", text="Result")
         self.tree.heading("signals", text="Signals / Values")
 
@@ -366,6 +367,7 @@ class ScreenerApp(tk.Tk):
         self.tree.column("price", width=110, anchor=tk.E)
         self.tree.column("cost", width=110, anchor=tk.E)
         self.tree.column("quantity", width=110, anchor=tk.CENTER)
+        self.tree.column("gain_loss", width=160, anchor=tk.E)
         self.tree.column("status", width=150, anchor=tk.CENTER)
         self.tree.column("signals", width=520, anchor=tk.W)
 
@@ -648,10 +650,37 @@ class ScreenerApp(tk.Tk):
         cost_text = "—" if cost is None else f"{float(cost):.2f}"
         qty_text = "—" if quantity in (None, "") else format_quantity(quantity)
 
+        gain_text = "—"
+        if price is not None and cost not in (None, ""):
+            try:
+                cost_val = float(cost)
+                qty_val = float(quantity) if quantity not in (None, "") else 1.0
+                diff = (price - cost_val) * qty_val
+                pct = ((price - cost_val) / cost_val * 100.0) if cost_val else None
+
+                sign_diff = "+" if diff >= 0 else ""
+                diff_text = f"{sign_diff}{diff:.2f}"
+
+                if pct is None:
+                    gain_text = diff_text
+                else:
+                    sign_pct = "+" if pct >= 0 else ""
+                    gain_text = f"{diff_text} ({sign_pct}{pct:.2f}%)"
+            except (TypeError, ValueError):
+                pass
+
         self.tree.insert(
             "",
             tk.END,
-            values=(res["ticker"], price_text, cost_text, qty_text, res["status"], sig_col),
+            values=(
+                res["ticker"],
+                price_text,
+                cost_text,
+                qty_text,
+                gain_text,
+                res["status"],
+                sig_col,
+            ),
             tags=tags,
         )
 
