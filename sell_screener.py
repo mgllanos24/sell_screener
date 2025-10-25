@@ -8,6 +8,7 @@ import datetime as dt
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import csv
+import re
 import numpy as np
 import pandas as pd
 
@@ -252,6 +253,8 @@ class ScreenerApp(tk.Tk):
         self.watchlist: list[dict[str, object]] = []
         self.queue = queue.Queue()
         self.market_condition_var = tk.StringVar(value="Market: Checking…")
+        self._sort_directions: dict[str, bool] = {}
+        self._column_labels: dict[str, str] = {}
 
         self._build_controls()
         self._build_table()
@@ -355,13 +358,19 @@ class ScreenerApp(tk.Tk):
 
         columns = ("ticker", "price", "cost", "quantity", "gain_loss", "status", "signals")
         self.tree = ttk.Treeview(container, columns=columns, show="headings")
-        self.tree.heading("ticker", text="Ticker")
-        self.tree.heading("price", text="Last Price")
-        self.tree.heading("cost", text="Cost Basis")
-        self.tree.heading("quantity", text="Qty (lots)")
-        self.tree.heading("gain_loss", text="Gain / Loss ($, %)")
-        self.tree.heading("status", text="Result")
-        self.tree.heading("signals", text="Signals / Values")
+
+        self._column_labels = {
+            "ticker": "Ticker",
+            "price": "Last Price",
+            "cost": "Cost Basis",
+            "quantity": "Qty (lots)",
+            "gain_loss": "Gain / Loss ($, %)",
+            "status": "Result",
+            "signals": "Signals / Values",
+        }
+
+        for col, label in self._column_labels.items():
+            self._configure_heading(col, label)
 
         self.tree.column("ticker", width=100, anchor=tk.CENTER)
         self.tree.column("price", width=110, anchor=tk.E)
@@ -718,6 +727,56 @@ class ScreenerApp(tk.Tk):
             "• Signals are heuristics, not advice. Always research before acting."
         )
         messagebox.showinfo("Help", msg)
+
+    def _configure_heading(self, column: str, text: str) -> None:
+        self.tree.heading(column, text=text, command=lambda c=column: self._sort_tree(c))
+
+    def _sort_tree(self, column: str) -> None:
+        reverse = self._sort_directions.get(column, False)
+        rows = [
+            (*self._sort_key(column, self.tree.set(child, column)), child)
+            for child in self.tree.get_children("")
+        ]
+
+        sortable = [row for row in rows if not row[0]]
+        missing = [row for row in rows if row[0]]
+
+        sortable.sort(key=lambda item: item[1], reverse=reverse)
+        ordered = sortable + missing
+
+        for index, (_, _, item) in enumerate(ordered):
+            self.tree.move(item, "", index)
+
+        self._sort_directions[column] = not reverse
+        for col, label in self._column_labels.items():
+            if col == column:
+                arrow = "▼" if reverse else "▲"
+                self._configure_heading(col, f"{label} {arrow}")
+            else:
+                self._sort_directions[col] = False
+                self._configure_heading(col, label)
+
+    def _sort_key(self, column: str, value: str) -> tuple[bool, object]:
+        if value in ("", "—", None):
+            return (True, "")
+
+        text = str(value).strip()
+
+        if column in {"price", "cost", "quantity"}:
+            try:
+                return (False, float(text.replace(",", "")))
+            except ValueError:
+                pass
+
+        if column == "gain_loss":
+            match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text)
+            if match:
+                try:
+                    return (False, float(match.group().replace(",", "")))
+                except ValueError:
+                    pass
+
+        return (False, text.lower())
 
 if __name__ == "__main__":
     app = ScreenerApp()
