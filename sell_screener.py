@@ -41,6 +41,25 @@ def format_quantity(value: object) -> str:
     return format(num, "g")
 
 
+DEFAULT_RULE_SETTINGS = {
+    "use_rsi": True,
+    "rsi_threshold": 70,
+    "use_ma": True,
+    "ma_fast": 20,
+    "ma_slow": 50,
+    "use_dd": False,
+    "drawdown_pct": 15.0,
+    "use_atr": True,
+    "atr_multiple": 3.0,
+    "risk_target_pct": DEFAULT_RISK_TARGET_PCT,
+    "min_triggers": 1,
+    "require_volume_confirmation": False,
+    "use_macd_confirmation": False,
+    "macd_mode": "hist",
+    "use_trend_filter": False,
+    "use_multi_rsi": False,
+}
+
 MARKET_PRESETS = {
     "Bullish": {
         "use_rsi": True,
@@ -705,22 +724,7 @@ class ScreenerApp(tk.Tk):
         self._build_status()
 
         # defaults
-        self.use_rsi_var.set(1)
-        self.rsi_thr_var.set(70)
-        self.use_ma_var.set(1)
-        self.fast_var.set(20)
-        self.slow_var.set(50)
-        self.use_dd_var.set(0)
-        self.dd_var.set(15)
-        self.use_atr_var.set(1)
-        self.atr_var.set(3.0)
-        self.risk_target_var.set(DEFAULT_RISK_TARGET_PCT)
-        self.min_triggers_var.set(1)
-        self.require_volume_var.set(0)
-        self.use_macd_confirm_var.set(0)
-        self.macd_mode_var.set(MACD_MODE_LABELS["hist"])
-        self.use_trend_filter_var.set(0)
-        self.use_multi_rsi_var.set(0)
+        self._apply_rule_settings(DEFAULT_RULE_SETTINGS)
 
         self.after(200, self._poll_queue)
         self.refresh_market_condition()
@@ -756,6 +760,7 @@ class ScreenerApp(tk.Tk):
         ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=12, padx=(24, 0))
         ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=13, padx=(6, 0))
         ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=14, padx=(18, 0))
+        ttk.Button(frm, text="Restore Default Settings", command=self.restore_default_settings).grid(row=0, column=15, padx=(6, 0))
 
         # Listbox of tickers
         self.listbox = tk.Listbox(frm, height=6, selectmode=tk.EXTENDED)
@@ -764,7 +769,7 @@ class ScreenerApp(tk.Tk):
         frm.grid_columnconfigure(5, weight=1)
         frm.grid_columnconfigure(7, weight=1)
 
-        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=15, sticky="w", pady=(8, 0))
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=16, sticky="w", pady=(8, 0))
 
         # Rules panel
         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
@@ -930,6 +935,10 @@ class ScreenerApp(tk.Tk):
         self.status.set("Detecting market condition…")
         self.market_condition_var.set("Market: Checking…")
         threading.Thread(target=self._fetch_market_condition, args=(True,), daemon=True).start()
+
+    def restore_default_settings(self):
+        self._apply_rule_settings(DEFAULT_RULE_SETTINGS)
+        self.status.set("Restored default rule settings.")
 
     def _fetch_market_condition(self, apply_preset: bool):
         try:
@@ -1185,28 +1194,31 @@ class ScreenerApp(tk.Tk):
         finally:
             self.after(150, self._poll_queue)
 
+    def _apply_rule_settings(self, settings: dict[str, Any]):
+        self.use_rsi_var.set(int(bool(settings.get("use_rsi", self.use_rsi_var.get()))))
+        self.rsi_thr_var.set(int(settings.get("rsi_threshold", self.rsi_thr_var.get())))
+        self.use_ma_var.set(int(bool(settings.get("use_ma", self.use_ma_var.get()))))
+        self.fast_var.set(int(settings.get("ma_fast", self.fast_var.get())))
+        self.slow_var.set(int(settings.get("ma_slow", self.slow_var.get())))
+        self.use_dd_var.set(int(bool(settings.get("use_dd", self.use_dd_var.get()))))
+        self.dd_var.set(float(settings.get("drawdown_pct", self.dd_var.get())))
+        self.use_atr_var.set(int(bool(settings.get("use_atr", self.use_atr_var.get()))))
+        self.atr_var.set(float(settings.get("atr_multiple", self.atr_var.get())))
+        self.risk_target_var.set(float(settings.get("risk_target_pct", DEFAULT_RISK_TARGET_PCT)))
+        self.min_triggers_var.set(int(settings.get("min_triggers", self.min_triggers_var.get())))
+        self.require_volume_var.set(int(bool(settings.get("require_volume_confirmation", self.require_volume_var.get()))))
+        self.use_macd_confirm_var.set(int(bool(settings.get("use_macd_confirmation", self.use_macd_confirm_var.get()))))
+        macd_mode_key = settings.get("macd_mode", "hist")
+        self.macd_mode_var.set(MACD_MODE_LABELS.get(macd_mode_key, MACD_MODE_LABELS["hist"]))
+        self.use_trend_filter_var.set(int(bool(settings.get("use_trend_filter", self.use_trend_filter_var.get()))))
+        self.use_multi_rsi_var.set(int(bool(settings.get("use_multi_rsi", self.use_multi_rsi_var.get()))))
+
     def _apply_market_preset(self, condition: str):
         preset = MARKET_PRESETS.get(condition)
         if not preset:
             return
 
-        self.use_rsi_var.set(int(preset["use_rsi"]))
-        self.rsi_thr_var.set(int(preset["rsi_threshold"]))
-        self.use_ma_var.set(int(preset["use_ma"]))
-        self.fast_var.set(int(preset["ma_fast"]))
-        self.slow_var.set(int(preset["ma_slow"]))
-        self.use_dd_var.set(int(preset["use_dd"]))
-        self.dd_var.set(float(preset["drawdown_pct"]))
-        self.use_atr_var.set(int(preset["use_atr"]))
-        self.atr_var.set(float(preset["atr_multiple"]))
-        self.risk_target_var.set(DEFAULT_RISK_TARGET_PCT)
-        self.min_triggers_var.set(int(preset["min_triggers"]))
-        self.require_volume_var.set(int(preset.get("require_volume_confirmation", 0)))
-        self.use_macd_confirm_var.set(int(preset.get("use_macd_confirmation", 0)))
-        macd_mode_key = preset.get("macd_mode", "hist")
-        self.macd_mode_var.set(MACD_MODE_LABELS.get(macd_mode_key, MACD_MODE_LABELS["hist"]))
-        self.use_trend_filter_var.set(int(preset.get("use_trend_filter", 0)))
-        self.use_multi_rsi_var.set(int(preset.get("use_multi_rsi", 0)))
+        self._apply_rule_settings(preset)
 
     def _handle_market_message(self, item: dict):
         condition = item["condition"]
