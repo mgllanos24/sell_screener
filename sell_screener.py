@@ -49,6 +49,11 @@ MARKET_PRESETS = {
         "use_atr": True,
         "atr_multiple": 3.5,
         "min_triggers": 2,
+        "require_volume_confirmation": False,
+        "use_macd_confirmation": False,
+        "macd_mode": "hist",
+        "use_trend_filter": False,
+        "use_multi_rsi": False,
     },
     "Sideways": {
         "use_rsi": True,
@@ -61,6 +66,11 @@ MARKET_PRESETS = {
         "use_atr": True,
         "atr_multiple": 3.0,
         "min_triggers": 2,
+        "require_volume_confirmation": False,
+        "use_macd_confirmation": False,
+        "macd_mode": "hist",
+        "use_trend_filter": False,
+        "use_multi_rsi": False,
     },
     "Bearish": {
         "use_rsi": True,
@@ -73,8 +83,20 @@ MARKET_PRESETS = {
         "use_atr": True,
         "atr_multiple": 2.5,
         "min_triggers": 1,
+        "require_volume_confirmation": False,
+        "use_macd_confirmation": False,
+        "macd_mode": "hist",
+        "use_trend_filter": True,
+        "use_multi_rsi": True,
     },
 }
+
+MACD_MODE_LABELS = {
+    "hist": "Histogram < 0",
+    "cross": "Signal cross down",
+}
+
+MACD_MODE_BY_LABEL = {label: key for key, label in MACD_MODE_LABELS.items()}
 
 # ---------- Indicator helpers ----------
 
@@ -109,27 +131,52 @@ def rule_rsi_overbought_cross(price: pd.Series, threshold: int = 70) -> dict:
     r = rsi(price, 14)
     # True when RSI is currently < threshold but was recently above => crossed down
     crossed = (r.iloc[-2] >= threshold) and (r.iloc[-1] < threshold)
-    return {"name": f"RSI cross below {threshold}", "triggered": bool(crossed), "value": round(float(r.iloc[-1]), 2)}
+    return {
+        "name": f"RSI cross below {threshold}",
+        "triggered": bool(crossed),
+        "value": round(float(r.iloc[-1]), 2),
+        "category": "signal",
+    }
 
 def rule_ma_bearish_cross(price: pd.Series, fast: int = 20, slow: int = 50) -> dict:
     f = ema(price, fast)
     s = sma(price, slow)
     if pd.isna(s.iloc[-1]) or pd.isna(s.iloc[-2]):
-        return {"name": f"EMA{fast}↓SMA{slow}", "triggered": False, "value": None}
+        return {
+            "name": f"EMA{fast}↓SMA{slow}",
+            "triggered": False,
+            "value": None,
+            "category": "signal",
+        }
     # Bearish cross: fast was above and now below slow
     crossed = (f.iloc[-2] > s.iloc[-2]) and (f.iloc[-1] < s.iloc[-1])
     val = f"{round(float(f.iloc[-1]),2)} vs {round(float(s.iloc[-1]),2)}"
-    return {"name": f"EMA{fast}↓SMA{slow} cross", "triggered": bool(crossed), "value": val}
+    return {
+        "name": f"EMA{fast}↓SMA{slow} cross",
+        "triggered": bool(crossed),
+        "value": val,
+        "category": "signal",
+    }
 
 def rule_drawdown_from_52w(price: pd.Series, max_dd_pct: float = 15.0) -> dict:
     # percent off the 252-trading-day high (~1y)
     window = min(252, len(price))
     if window < 50:
-        return {"name": f">{max_dd_pct}% below 52w high", "triggered": False, "value": None}
+        return {
+            "name": f">{max_dd_pct}% below 52w high",
+            "triggered": False,
+            "value": None,
+            "category": "signal",
+        }
     rolling_high = price.rolling(window=window).max()
     dd = (rolling_high.iloc[-1] - price.iloc[-1]) / rolling_high.iloc[-1] * 100.0
     trig = dd >= max_dd_pct
-    return {"name": f">{max_dd_pct:.0f}% below 52w high", "triggered": bool(trig), "value": round(float(dd), 2)}
+    return {
+        "name": f">{max_dd_pct:.0f}% below 52w high",
+        "triggered": bool(trig),
+        "value": round(float(dd), 2),
+        "category": "signal",
+    }
 
 def rule_atr_trailing_stop(high: pd.Series, low: pd.Series, close: pd.Series, multiple: float = 3.0) -> dict:
     # Simple Chandelier-like exit: stop = highest close(22) - multiple*ATR(14); sell if close < stop
@@ -138,10 +185,173 @@ def rule_atr_trailing_stop(high: pd.Series, low: pd.Series, close: pd.Series, mu
     highest_close = close.rolling(window=period_high).max()
     stop = highest_close - multiple * a
     if pd.isna(stop.iloc[-1]):
-        return {"name": f"Close < (Highest{period_high} - {multiple}×ATR)", "triggered": False, "value": None}
+        return {
+            "name": f"Close < (Highest{period_high} - {multiple}×ATR)",
+            "triggered": False,
+            "value": None,
+            "category": "signal",
+        }
     trig = close.iloc[-1] < stop.iloc[-1]
     val = f"Close {round(float(close.iloc[-1]),2)} vs Stop {round(float(stop.iloc[-1]),2)}"
-    return {"name": f"ATR trailing stop ({multiple}×)", "triggered": bool(trig), "value": val}
+    return {
+        "name": f"ATR trailing stop ({multiple}×)",
+        "triggered": bool(trig),
+        "value": val,
+        "category": "signal",
+    }
+
+
+def rule_volume_confirmation(volume: pd.Series, factor: float = 1.3, period: int = 20) -> dict:
+    if volume is None or volume.empty:
+        return {
+            "name": f"Volume ≥ {factor:.1f}× {period}d avg",
+            "triggered": False,
+            "value": "No volume data",
+            "category": "confirmation",
+        }
+
+    if len(volume) < period + 1:
+        return {
+            "name": f"Volume ≥ {factor:.1f}× {period}d avg",
+            "triggered": False,
+            "value": "Insufficient data",
+            "category": "confirmation",
+        }
+
+    recent_avg = volume.tail(period).mean()
+    latest_volume = float(volume.iloc[-1])
+    ratio = latest_volume / recent_avg if recent_avg else 0.0
+    triggered = ratio >= factor
+    value = f"{ratio:.2f}× avg"
+    return {
+        "name": f"Volume ≥ {factor:.1f}× {period}d avg",
+        "triggered": bool(triggered),
+        "value": value,
+        "category": "confirmation",
+    }
+
+
+def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series, pd.Series]:
+    fast_ema = ema(series, fast)
+    slow_ema = ema(series, slow)
+    macd_line = fast_ema - slow_ema
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def rule_macd_confirmation(close: pd.Series, mode: str = "hist") -> dict:
+    if close is None or close.empty:
+        return {
+            "name": "MACD confirmation",
+            "triggered": False,
+            "value": "No price data",
+            "category": "confirmation",
+        }
+
+    if mode not in {"hist", "cross"}:
+        mode = "hist"
+
+    macd_line, signal_line, histogram = macd(close)
+    if len(macd_line) < 2 or macd_line.isna().iloc[-1] or signal_line.isna().iloc[-1]:
+        return {
+            "name": "MACD confirmation",
+            "triggered": False,
+            "value": "Insufficient data",
+            "category": "confirmation",
+        }
+
+    if mode == "cross":
+        crossed = (macd_line.iloc[-2] >= signal_line.iloc[-2]) and (macd_line.iloc[-1] < signal_line.iloc[-1])
+        value = f"MACD {macd_line.iloc[-1]:.2f} vs Signal {signal_line.iloc[-1]:.2f}"
+        name = "MACD signal cross down"
+        triggered = bool(crossed)
+    else:
+        hist_value = float(histogram.iloc[-1])
+        name = "MACD histogram < 0"
+        triggered = hist_value < 0
+        value = f"Hist {hist_value:.2f}"
+
+    return {
+        "name": name,
+        "triggered": triggered,
+        "value": value,
+        "category": "confirmation",
+    }
+
+
+def rule_trend_filter(close: pd.Series, period: int = 200) -> dict:
+    if close is None or close.empty:
+        return {
+            "name": f"Close < SMA{period}",
+            "triggered": False,
+            "value": "No price data",
+            "category": "filter",
+        }
+
+    trend = sma(close, period)
+    if trend.isna().iloc[-1]:
+        return {
+            "name": f"Close < SMA{period}",
+            "triggered": False,
+            "value": "Insufficient data",
+            "category": "filter",
+        }
+
+    latest_close = float(close.iloc[-1])
+    latest_sma = float(trend.iloc[-1])
+    triggered = latest_close < latest_sma
+    value = f"{latest_close:.2f} vs SMA{period} {latest_sma:.2f}"
+    return {
+        "name": f"Close < SMA{period}",
+        "triggered": triggered,
+        "value": value,
+        "category": "filter",
+    }
+
+
+def rule_multi_timeframe_rsi(close: pd.Series) -> dict:
+    if close is None or close.empty:
+        return {
+            "name": "RSI14 < 50 & RSI50 trending down",
+            "triggered": False,
+            "value": "No price data",
+            "category": "confirmation",
+        }
+
+    if len(close) < 60:
+        return {
+            "name": "RSI14 < 50 & RSI50 trending down",
+            "triggered": False,
+            "value": "Insufficient data",
+            "category": "confirmation",
+        }
+
+    rsi14 = rsi(close, 14)
+    rsi50 = rsi(close, 50)
+
+    if rsi50.isna().iloc[-1]:
+        return {
+            "name": "RSI14 < 50 & RSI50 trending down",
+            "triggered": False,
+            "value": "Insufficient data",
+            "category": "confirmation",
+        }
+
+    lookback = 5 if len(rsi50) > 5 else max(len(rsi50) - 1, 1)
+    prev_value = float(rsi50.iloc[-lookback - 1]) if len(rsi50) > lookback else float(rsi50.iloc[-1])
+    latest_rsi50 = float(rsi50.iloc[-1])
+    delta50 = latest_rsi50 - prev_value
+    latest_rsi14 = float(rsi14.iloc[-1])
+
+    triggered = (latest_rsi14 < 50) and (delta50 < 0)
+    value = f"RSI14 {latest_rsi14:.1f}, ΔRSI50 {delta50:.1f}"
+    return {
+        "name": "RSI14 < 50 & RSI50 trending down",
+        "triggered": triggered,
+        "value": value,
+        "category": "confirmation",
+    }
 
 # ---------- Data ----------
 
@@ -205,41 +415,106 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
     try:
         df = fetch_history(ticker)
         if df.empty or len(df) < 50:
-            return {"ticker": ticker, "status": "Insufficient data", "ready": False, "price": None, "rules": []}
+            return {
+                "ticker": ticker,
+                "status": "Insufficient data",
+                "ready": False,
+                "price": None,
+                "rules": [],
+                "volume_confirmation": None,
+                "macd_confirmation": None,
+                "trend_filter": None,
+                "multi_rsi": None,
+            }
 
         close = df["Close"]
         high = df["High"]
         low = df["Low"]
+        volume = df.get("Volume")
 
         results = []
 
-        if config["use_rsi"]:
-            results.append(rule_rsi_overbought_cross(close, config["rsi_threshold"]))
+        if config.get("use_rsi", False):
+            results.append(rule_rsi_overbought_cross(close, config.get("rsi_threshold", 70)))
 
-        if config["use_ma"]:
-            results.append(rule_ma_bearish_cross(close, config["ma_fast"], config["ma_slow"]))
+        if config.get("use_ma", False):
+            results.append(
+                rule_ma_bearish_cross(
+                    close,
+                    config.get("ma_fast", 20),
+                    config.get("ma_slow", 50),
+                )
+            )
 
-        if config["use_dd"]:
-            results.append(rule_drawdown_from_52w(close, config["drawdown_pct"]))
+        if config.get("use_dd", False):
+            results.append(rule_drawdown_from_52w(close, config.get("drawdown_pct", 15.0)))
 
-        if config["use_atr"]:
-            results.append(rule_atr_trailing_stop(high, low, close, config["atr_multiple"]))
+        if config.get("use_atr", False):
+            results.append(rule_atr_trailing_stop(high, low, close, config.get("atr_multiple", 3.0)))
 
-        triggered = [r for r in results if r["triggered"]]
-        ready = len(triggered) >= config["min_triggers"]
+        volume_result = rule_volume_confirmation(volume)
+        macd_result = rule_macd_confirmation(close, config.get("macd_mode", "hist"))
+        trend_result = rule_trend_filter(close)
+        multi_rsi_result = rule_multi_timeframe_rsi(close)
+
+        results.extend([volume_result, macd_result, trend_result, multi_rsi_result])
+
+        triggered_signals = [r for r in results if r.get("category") == "signal" and r["triggered"]]
+        min_triggers = max(int(config.get("min_triggers", 1)), 0)
+        ready = len(triggered_signals) >= min_triggers
+
+        gating_reasons = []
+
+        if config.get("require_volume_confirmation", False) and not volume_result.get("triggered"):
+            ready = False
+            gating_reasons.append(volume_result["name"])
+
+        if config.get("use_macd_confirmation", False) and not macd_result.get("triggered"):
+            ready = False
+            gating_reasons.append(macd_result["name"])
+
+        if config.get("use_trend_filter", False) and not trend_result.get("triggered"):
+            ready = False
+            gating_reasons.append(trend_result["name"])
+
+        if config.get("use_multi_rsi", False) and not multi_rsi_result.get("triggered"):
+            ready = False
+            gating_reasons.append(multi_rsi_result["name"])
 
         last_price = float(close.iloc[-1])
-        status = "Ready to SELL" if ready else "Hold/Review"
+
+        if ready:
+            status = "Ready to SELL"
+        else:
+            if gating_reasons:
+                needs = ", ".join(gating_reasons)
+                status = f"Hold/Review (Needs: {needs})"
+            else:
+                status = f"Hold/Review ({len(triggered_signals)}/{min_triggers} signals)"
 
         return {
             "ticker": ticker.upper(),
             "status": status,
             "ready": ready,
             "price": round(last_price, 2),
-            "rules": results
+            "rules": results,
+            "volume_confirmation": volume_result,
+            "macd_confirmation": macd_result,
+            "trend_filter": trend_result,
+            "multi_rsi": multi_rsi_result,
         }
     except Exception as e:
-        return {"ticker": ticker, "status": f"Error: {e}", "ready": False, "price": None, "rules": []}
+        return {
+            "ticker": ticker,
+            "status": f"Error: {e}",
+            "ready": False,
+            "price": None,
+            "rules": [],
+            "volume_confirmation": None,
+            "macd_confirmation": None,
+            "trend_filter": None,
+            "multi_rsi": None,
+        }
 
 # ---------- GUI ----------
 
@@ -247,8 +522,8 @@ class ScreenerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("900x560")
-        self.minsize(820, 520)
+        self.geometry("1180x580")
+        self.minsize(960, 540)
 
         self.watchlist: list[dict[str, object]] = []
         self.queue = queue.Queue()
@@ -271,6 +546,11 @@ class ScreenerApp(tk.Tk):
         self.use_atr_var.set(1)
         self.atr_var.set(3.0)
         self.min_triggers_var.set(1)
+        self.require_volume_var.set(0)
+        self.use_macd_confirm_var.set(0)
+        self.macd_mode_var.set(MACD_MODE_LABELS["hist"])
+        self.use_trend_filter_var.set(0)
+        self.use_multi_rsi_var.set(0)
 
         self.after(200, self._poll_queue)
         self.refresh_market_condition()
@@ -352,11 +632,64 @@ class ScreenerApp(tk.Tk):
         self.min_triggers_var = tk.IntVar(value=1)
         ttk.Spinbox(rules, from_=1, to=4, textvariable=self.min_triggers_var, width=6).grid(row=4, column=1, sticky="w", pady=(8, 0))
 
+        ttk.Separator(rules, orient="horizontal").grid(row=5, column=0, columnspan=5, sticky="ew", pady=(10, 6))
+
+        self.require_volume_var = tk.IntVar(value=0)
+        ttk.Checkbutton(
+            rules,
+            text="Require volume ≥ 1.3× 20d avg",
+            variable=self.require_volume_var,
+        ).grid(row=6, column=0, columnspan=3, sticky="w")
+
+        self.use_macd_confirm_var = tk.IntVar(value=0)
+        ttk.Checkbutton(
+            rules,
+            text="Require MACD confirmation",
+            variable=self.use_macd_confirm_var,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        ttk.Label(rules, text="Mode").grid(row=7, column=3, sticky="e")
+        self.macd_mode_var = tk.StringVar(value=MACD_MODE_LABELS["hist"])
+        self.macd_mode_combo = ttk.Combobox(
+            rules,
+            textvariable=self.macd_mode_var,
+            values=list(MACD_MODE_LABELS.values()),
+            width=18,
+            state="readonly",
+        )
+        self.macd_mode_combo.grid(row=7, column=4, sticky="w", pady=(4, 0))
+
+        self.use_trend_filter_var = tk.IntVar(value=0)
+        ttk.Checkbutton(
+            rules,
+            text="Require price below SMA200",
+            variable=self.use_trend_filter_var,
+        ).grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        self.use_multi_rsi_var = tk.IntVar(value=0)
+        ttk.Checkbutton(
+            rules,
+            text="Require multi-timeframe RSI confirmation",
+            variable=self.use_multi_rsi_var,
+        ).grid(row=9, column=0, columnspan=5, sticky="w", pady=(4, 0))
+
     def _build_table(self):
         container = ttk.Frame(self)
         container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
 
-        columns = ("ticker", "price", "cost", "quantity", "gain_loss", "status", "signals")
+        columns = (
+            "ticker",
+            "price",
+            "cost",
+            "quantity",
+            "gain_loss",
+            "status",
+            "volume",
+            "macd",
+            "trend",
+            "multi_rsi",
+            "signals",
+        )
         self.tree = ttk.Treeview(container, columns=columns, show="headings")
 
         self._column_labels = {
@@ -366,6 +699,10 @@ class ScreenerApp(tk.Tk):
             "quantity": "Qty (lots)",
             "gain_loss": "Gain / Loss ($, %)",
             "status": "Result",
+            "volume": "Volume Confirmation",
+            "macd": "MACD Confirmation",
+            "trend": "Trend Filter",
+            "multi_rsi": "Multi-timeframe RSI",
             "signals": "Signals / Values",
         }
 
@@ -378,7 +715,11 @@ class ScreenerApp(tk.Tk):
         self.tree.column("quantity", width=110, anchor=tk.CENTER)
         self.tree.column("gain_loss", width=160, anchor=tk.E)
         self.tree.column("status", width=150, anchor=tk.CENTER)
-        self.tree.column("signals", width=520, anchor=tk.W)
+        self.tree.column("volume", width=170, anchor=tk.W)
+        self.tree.column("macd", width=170, anchor=tk.W)
+        self.tree.column("trend", width=170, anchor=tk.W)
+        self.tree.column("multi_rsi", width=190, anchor=tk.W)
+        self.tree.column("signals", width=380, anchor=tk.W)
 
         vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=vsb.set)
@@ -550,6 +891,9 @@ class ScreenerApp(tk.Tk):
             fast = min(fast, slow - 1)
             self.fast_var.set(fast)
 
+        macd_mode_label = self.macd_mode_var.get()
+        macd_mode = MACD_MODE_BY_LABEL.get(macd_mode_label, "hist")
+
         return {
             "use_rsi": bool(self.use_rsi_var.get()),
             "rsi_threshold": int(self.rsi_thr_var.get()),
@@ -560,7 +904,12 @@ class ScreenerApp(tk.Tk):
             "drawdown_pct": float(self.dd_var.get()),
             "use_atr": bool(self.use_atr_var.get()),
             "atr_multiple": float(self.atr_var.get()),
-            "min_triggers": int(self.min_triggers_var.get())
+            "min_triggers": int(self.min_triggers_var.get()),
+            "require_volume_confirmation": bool(self.require_volume_var.get()),
+            "use_macd_confirmation": bool(self.use_macd_confirm_var.get()),
+            "macd_mode": macd_mode,
+            "use_trend_filter": bool(self.use_trend_filter_var.get()),
+            "use_multi_rsi": bool(self.use_multi_rsi_var.get()),
         }
 
     def scan(self):
@@ -616,6 +965,12 @@ class ScreenerApp(tk.Tk):
         self.use_atr_var.set(int(preset["use_atr"]))
         self.atr_var.set(float(preset["atr_multiple"]))
         self.min_triggers_var.set(int(preset["min_triggers"]))
+        self.require_volume_var.set(int(preset.get("require_volume_confirmation", 0)))
+        self.use_macd_confirm_var.set(int(preset.get("use_macd_confirmation", 0)))
+        macd_mode_key = preset.get("macd_mode", "hist")
+        self.macd_mode_var.set(MACD_MODE_LABELS.get(macd_mode_key, MACD_MODE_LABELS["hist"]))
+        self.use_trend_filter_var.set(int(preset.get("use_trend_filter", 0)))
+        self.use_multi_rsi_var.set(int(preset.get("use_multi_rsi", 0)))
 
     def _handle_market_message(self, item: dict):
         condition = item["condition"]
@@ -635,6 +990,16 @@ class ScreenerApp(tk.Tk):
         else:
             self.status.set(f"Failed to refresh market info: {item.get('error')}")
 
+    def _format_check_cell(self, result: dict | None) -> str:
+        if not result:
+            return "—"
+
+        mark = "✅" if result.get("triggered") else "—"
+        value = result.get("value")
+        if value in (None, ""):
+            return mark
+        return f"{mark} {value}"
+
     def _add_result_row(self, res: dict):
         sig_texts = []
         for r in res["rules"]:
@@ -642,6 +1007,11 @@ class ScreenerApp(tk.Tk):
             val = "" if r["value"] is None else f" ({r['value']})"
             sig_texts.append(f"{mark} {r['name']}{val}")
         sig_col = " | ".join(sig_texts) if sig_texts else "No rules evaluated"
+
+        volume_text = self._format_check_cell(res.get("volume_confirmation"))
+        macd_text = self._format_check_cell(res.get("macd_confirmation"))
+        trend_text = self._format_check_cell(res.get("trend_filter"))
+        multi_rsi_text = self._format_check_cell(res.get("multi_rsi"))
 
         tags = ()
         if res["status"].startswith("Ready"):
@@ -709,6 +1079,10 @@ class ScreenerApp(tk.Tk):
                 qty_text,
                 gain_text,
                 res["status"],
+                volume_text,
+                macd_text,
+                trend_text,
+                multi_rsi_text,
                 sig_col,
             ),
             tags=tags,
@@ -720,7 +1094,11 @@ class ScreenerApp(tk.Tk):
             "• RSI cross down: flags when RSI(14) drops back below your threshold (default 70).\n"
             "• EMA/SMA cross: flags when EMA(fast) crosses below SMA(slow) (default 20 vs 50).\n"
             "• 52-week drawdown: flags if price is ≥ your % below the 52-week high.\n"
-            "• ATR trailing stop: flags when close falls below (highest 22-day close − N×ATR(14)).\n\n"
+            "• ATR trailing stop: flags when close falls below (highest 22-day close − N×ATR(14)).\n"
+            "• Volume confirmation: optional filter requiring ≥1.3× the 20-day average volume on the signal day.\n"
+            "• MACD confirmation: require a bearish histogram or signal-line crossover before flagging.\n"
+            "• Trend filter: only flag if price is below the 200-day simple moving average.\n"
+            "• Multi-timeframe RSI: require RSI(14) < 50 with RSI(50) trending lower for added conviction.\n\n"
             "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
             "Tips:\n"
             "• Use CSV to save/load your watchlist.\n"
