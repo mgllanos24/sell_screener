@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import csv
 import re
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -21,6 +23,8 @@ APP_TITLE = "Sell Signal Screener"
 DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
 MARKET_REFERENCE_TICKER = "^GSPC"
 MARKET_LOOKBACK_DAYS = 320
+ATR_TRAIL_LOOKBACK = 22
+DEFAULT_RISK_TARGET_PCT = 2.0
 
 
 def format_quantity(value: object) -> str:
@@ -125,6 +129,108 @@ def ema(series: pd.Series, period: int) -> pd.Series:
 def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(window=period, min_periods=period).mean()
 
+
+def classify_volatility(atr_percent: float | None) -> tuple[str, float | None]:
+    if atr_percent is None or not np.isfinite(atr_percent):
+        return "Unknown", None
+
+    value = atr_percent * 100.0
+    if value >= 6.0:
+        return "High", value
+    if value >= 4.0:
+        return "Elevated", value
+    if value <= 1.5:
+        return "Calm", value
+    return "Normal", value
+
+
+def adjust_thresholds_for_volatility(
+    base_rsi: int,
+    base_fast: int,
+    base_slow: int,
+    atr_percent: float | None,
+) -> tuple[int, int, int, str, float | None]:
+    label, pct_value = classify_volatility(atr_percent)
+    rsi_threshold = base_rsi
+    fast = base_fast
+    slow = base_slow
+
+    if pct_value is None:
+        return rsi_threshold, fast, slow, label, pct_value
+
+    if pct_value >= 6.0:
+        rsi_threshold = max(50, base_rsi - 8)
+        fast = max(5, base_fast - 3)
+        slow = max(fast + 3, base_slow - 5)
+    elif pct_value >= 4.0:
+        rsi_threshold = max(50, base_rsi - 5)
+        fast = max(5, base_fast - 2)
+        slow = max(fast + 3, base_slow - 3)
+    elif pct_value <= 1.5:
+        rsi_threshold = min(90, base_rsi + 5)
+        fast = base_fast + 1
+        slow = base_slow + 3
+
+    slow = max(fast + 1, slow)
+    return int(rsi_threshold), int(fast), int(slow), label, pct_value
+
+
+def compute_risk_based_sizing(
+    close: float,
+    atr_value: float | None,
+    atr_multiple: float,
+    risk_target_pct: float,
+    quantity: float | None,
+    trailing_stop: float | None,
+) -> dict[str, Any]:
+    stop_price = trailing_stop if trailing_stop is not None else None
+    if stop_price is None and atr_value is not None:
+        stop_price = close - atr_multiple * atr_value
+    if stop_price is not None:
+        try:
+            stop_price = float(stop_price)
+        except (TypeError, ValueError):
+            stop_price = None
+        else:
+            if not np.isfinite(stop_price):
+                stop_price = None
+            elif stop_price < 0:
+                stop_price = 0.0
+    risk_pct = None
+
+    if risk_target_pct <= 0:
+        risk_target_pct = DEFAULT_RISK_TARGET_PCT
+
+    if stop_price is not None and close > 0:
+        risk_pct = max((close - stop_price) / close * 100.0, 0.0)
+    elif atr_value is not None and close > 0:
+        risk_pct = max((atr_value / close) * 100.0 * max(atr_multiple, 1e-9), 0.0)
+
+    sell_pct = None
+    sell_lots = None
+
+    if risk_pct is not None:
+        if risk_pct <= risk_target_pct:
+            sell_pct = 0.0
+        else:
+            sell_pct = min(1.0, 1.0 - (risk_target_pct / risk_pct))
+
+        if quantity not in (None, ""):
+            try:
+                qty = float(quantity)
+            except (TypeError, ValueError):
+                qty = None
+            if qty is not None and qty > 0 and sell_pct is not None:
+                sell_lots = qty * sell_pct
+
+    return {
+        "stop": stop_price,
+        "risk_pct": risk_pct,
+        "sell_pct": sell_pct,
+        "sell_lots": sell_lots,
+        "risk_target_pct": risk_target_pct,
+    }
+
 # ---------- Sell rules ----------
 
 def rule_rsi_overbought_cross(price: pd.Series, threshold: int = 70) -> dict:
@@ -180,7 +286,7 @@ def rule_drawdown_from_52w(price: pd.Series, max_dd_pct: float = 15.0) -> dict:
 
 def rule_atr_trailing_stop(high: pd.Series, low: pd.Series, close: pd.Series, multiple: float = 3.0) -> dict:
     # Simple Chandelier-like exit: stop = highest close(22) - multiple*ATR(14); sell if close < stop
-    period_high = 22
+    period_high = ATR_TRAIL_LOOKBACK
     a = atr(high, low, close, 14)
     highest_close = close.rolling(window=period_high).max()
     stop = highest_close - multiple * a
@@ -411,7 +517,7 @@ def determine_market_condition() -> tuple[str, str]:
 
 # ---------- Screening logic ----------
 
-def evaluate_ticker(ticker: str, config: dict) -> dict:
+def evaluate_ticker(ticker: str, config: dict, overrides: dict | None = None) -> dict:
     try:
         df = fetch_history(ticker)
         if df.empty or len(df) < 50:
@@ -432,17 +538,52 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
         low = df["Low"]
         volume = df.get("Volume")
 
+        atr_series = atr(high, low, close, 14)
+        last_close = float(close.iloc[-1])
+        atr_raw = atr_series.iloc[-1] if not atr_series.empty else None
+        atr_value = float(atr_raw) if atr_raw is not None and pd.notna(atr_raw) else None
+        if not np.isfinite(last_close):
+            raise ValueError("Invalid price data")
+        atr_percent = None
+        if atr_value is not None and last_close != 0:
+            atr_percent = atr_value / last_close
+
+        override_multiplier = None
+        override_quantity = None
+        if overrides:
+            override_multiplier = overrides.get("atr_multiplier")
+            override_quantity = overrides.get("quantity")
+
+        atr_multiple = config.get("atr_multiple", 3.0)
+        try:
+            if override_multiplier not in (None, ""):
+                atr_multiple = float(override_multiplier)
+        except (TypeError, ValueError):
+            atr_multiple = config.get("atr_multiple", 3.0)
+        if atr_multiple <= 0:
+            atr_multiple = config.get("atr_multiple", 3.0) or 1.0
+
+        base_rsi = int(config.get("rsi_threshold", 70))
+        base_fast = int(config.get("ma_fast", 20))
+        base_slow = int(config.get("ma_slow", 50))
+        adj_rsi, adj_fast, adj_slow, vol_label, atr_pct_value = adjust_thresholds_for_volatility(
+            base_rsi,
+            base_fast,
+            base_slow,
+            atr_percent,
+        )
+
         results = []
 
         if config.get("use_rsi", False):
-            results.append(rule_rsi_overbought_cross(close, config.get("rsi_threshold", 70)))
+            results.append(rule_rsi_overbought_cross(close, adj_rsi))
 
         if config.get("use_ma", False):
             results.append(
                 rule_ma_bearish_cross(
                     close,
-                    config.get("ma_fast", 20),
-                    config.get("ma_slow", 50),
+                    adj_fast,
+                    adj_slow,
                 )
             )
 
@@ -450,7 +591,7 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
             results.append(rule_drawdown_from_52w(close, config.get("drawdown_pct", 15.0)))
 
         if config.get("use_atr", False):
-            results.append(rule_atr_trailing_stop(high, low, close, config.get("atr_multiple", 3.0)))
+            results.append(rule_atr_trailing_stop(high, low, close, atr_multiple))
 
         volume_result = rule_volume_confirmation(volume)
         macd_result = rule_macd_confirmation(close, config.get("macd_mode", "hist"))
@@ -481,7 +622,24 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
             ready = False
             gating_reasons.append(multi_rsi_result["name"])
 
-        last_price = float(close.iloc[-1])
+        last_price = last_close
+
+        trailing_stop = None
+        if len(close) >= ATR_TRAIL_LOOKBACK:
+            highest_close = close.rolling(window=ATR_TRAIL_LOOKBACK).max()
+            stop_series = highest_close - atr_multiple * atr_series
+            stop_value = stop_series.iloc[-1]
+            if pd.notna(stop_value):
+                trailing_stop = float(stop_value)
+
+        risk_info = compute_risk_based_sizing(
+            last_price,
+            atr_value,
+            atr_multiple,
+            float(config.get("risk_target_pct", DEFAULT_RISK_TARGET_PCT)),
+            override_quantity,
+            trailing_stop,
+        )
 
         if ready:
             status = "Ready to SELL"
@@ -502,6 +660,15 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
             "macd_confirmation": macd_result,
             "trend_filter": trend_result,
             "multi_rsi": multi_rsi_result,
+            "risk": risk_info,
+            "volatility": {
+                "label": vol_label,
+                "atr_pct": atr_pct_value,
+                "rsi_threshold": adj_rsi,
+                "ma_fast": adj_fast,
+                "ma_slow": adj_slow,
+                "atr_multiple": atr_multiple,
+            },
         }
     except Exception as e:
         return {
@@ -514,6 +681,8 @@ def evaluate_ticker(ticker: str, config: dict) -> dict:
             "macd_confirmation": None,
             "trend_filter": None,
             "multi_rsi": None,
+            "risk": {},
+            "volatility": {},
         }
 
 # ---------- GUI ----------
@@ -545,6 +714,7 @@ class ScreenerApp(tk.Tk):
         self.dd_var.set(15)
         self.use_atr_var.set(1)
         self.atr_var.set(3.0)
+        self.risk_target_var.set(DEFAULT_RISK_TARGET_PCT)
         self.min_triggers_var.set(1)
         self.require_volume_var.set(0)
         self.use_macd_confirm_var.set(0)
@@ -574,21 +744,27 @@ class ScreenerApp(tk.Tk):
         self.qty_entry = ttk.Entry(frm, textvariable=self.qty_var, width=8)
         self.qty_entry.grid(row=0, column=5, padx=(4, 12))
 
-        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=6)
-        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=7, padx=(12, 0))
-        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=8, padx=(12, 0))
-        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=9, padx=(6, 0))
-        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=10, padx=(24, 0))
-        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=11, padx=(6, 0))
-        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=12, padx=(18, 0))
+        ttk.Label(frm, text="ATR× override:").grid(row=0, column=6, sticky="e")
+        self.atr_factor_var = tk.StringVar()
+        self.atr_factor_entry = ttk.Entry(frm, textvariable=self.atr_factor_var, width=6)
+        self.atr_factor_entry.grid(row=0, column=7, padx=(4, 12))
+
+        ttk.Button(frm, text="Add/Update", command=self.add_ticker).grid(row=0, column=8)
+        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=9, padx=(12, 0))
+        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=10, padx=(12, 0))
+        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=11, padx=(6, 0))
+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=12, padx=(24, 0))
+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=13, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=14, padx=(18, 0))
 
         # Listbox of tickers
         self.listbox = tk.Listbox(frm, height=6, selectmode=tk.EXTENDED)
-        self.listbox.grid(row=1, column=0, columnspan=6, padx=(0, 12), pady=(8, 0), sticky="nsew")
+        self.listbox.grid(row=1, column=0, columnspan=7, padx=(0, 12), pady=(8, 0), sticky="nsew")
         frm.grid_columnconfigure(1, weight=1)
         frm.grid_columnconfigure(5, weight=1)
+        frm.grid_columnconfigure(7, weight=1)
 
-        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=13, sticky="w", pady=(8, 0))
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=15, sticky="w", pady=(8, 0))
 
         # Rules panel
         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
@@ -626,6 +802,9 @@ class ScreenerApp(tk.Tk):
         self.atr_var = tk.DoubleVar(value=3.0)
         ttk.Label(rules, text="N=").grid(row=3, column=1, sticky="e")
         ttk.Spinbox(rules, from_=1.0, to=5.0, increment=0.5, textvariable=self.atr_var, width=6).grid(row=3, column=2, sticky="w")
+        ttk.Label(rules, text="Risk target %").grid(row=3, column=3, sticky="e")
+        self.risk_target_var = tk.DoubleVar(value=DEFAULT_RISK_TARGET_PCT)
+        ttk.Spinbox(rules, from_=0.5, to=10.0, increment=0.5, textvariable=self.risk_target_var, width=6).grid(row=3, column=4, sticky="w")
 
         # Min triggers
         ttk.Label(rules, text="Min signals to flag as 'Ready to SELL'").grid(row=4, column=0, sticky="w", pady=(8, 0))
@@ -684,6 +863,7 @@ class ScreenerApp(tk.Tk):
             "quantity",
             "gain_loss",
             "status",
+            "risk",
             "volume",
             "macd",
             "trend",
@@ -699,6 +879,7 @@ class ScreenerApp(tk.Tk):
             "quantity": "Qty (lots)",
             "gain_loss": "Gain / Loss ($, %)",
             "status": "Result",
+            "risk": "Risk Sizing",
             "volume": "Volume Confirmation",
             "macd": "MACD Confirmation",
             "trend": "Trend Filter",
@@ -715,6 +896,7 @@ class ScreenerApp(tk.Tk):
         self.tree.column("quantity", width=110, anchor=tk.CENTER)
         self.tree.column("gain_loss", width=160, anchor=tk.E)
         self.tree.column("status", width=150, anchor=tk.CENTER)
+        self.tree.column("risk", width=220, anchor=tk.W)
         self.tree.column("volume", width=170, anchor=tk.W)
         self.tree.column("macd", width=170, anchor=tk.W)
         self.tree.column("trend", width=170, anchor=tk.W)
@@ -768,9 +950,17 @@ class ScreenerApp(tk.Tk):
         for item in self.watchlist:
             cost = item.get("cost")
             qty = item.get("quantity")
+            atr_override = item.get("atr_multiplier")
             cost_text = "—" if cost is None else f"{cost:.2f}"
             qty_text = "—" if qty in (None, "") else format_quantity(qty)
-            display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text}"
+            if atr_override in (None, ""):
+                atr_text = "—"
+            else:
+                try:
+                    atr_text = f"{float(atr_override):g}×"
+                except (TypeError, ValueError):
+                    atr_text = str(atr_override)
+            display = f"{item['ticker']} | Cost: {cost_text} | Qty (lots): {qty_text} | ATR×: {atr_text}"
             self.listbox.insert(tk.END, display)
 
     def add_ticker(self):
@@ -780,6 +970,7 @@ class ScreenerApp(tk.Tk):
 
         cost_str = self.cost_var.get().strip()
         qty_str = self.qty_var.get().strip()
+        atr_factor_str = self.atr_factor_var.get().strip()
 
         try:
             cost = float(cost_str)
@@ -797,22 +988,41 @@ class ScreenerApp(tk.Tk):
             messagebox.showerror("Invalid quantity", "Quantity (lots) must be a positive number.")
             return
 
+        atr_factor = None
+        if atr_factor_str:
+            try:
+                atr_factor = float(atr_factor_str)
+                if atr_factor <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Invalid ATR×", "ATR override must be a positive number (or leave blank).")
+                return
+
         updated = False
         for item in self.watchlist:
             if item["ticker"] == t:
                 item["cost"] = cost
                 item["quantity"] = quantity
+                item["atr_multiplier"] = atr_factor
                 updated = True
                 break
         if not updated:
-            self.watchlist.append({"ticker": t, "cost": cost, "quantity": quantity})
+            self.watchlist.append({
+                "ticker": t,
+                "cost": cost,
+                "quantity": quantity,
+                "atr_multiplier": atr_factor,
+            })
 
         self._refresh_watchlist()
         self.ticker_entry.delete(0, tk.END)
         self.cost_var.set("")
         self.qty_var.set("1")
+        self.atr_factor_var.set("")
         self.status.set(
-            f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({format_quantity(quantity)} lots)."
+            f"{'Updated' if updated else 'Added'} {t} @ {cost:.2f} ({format_quantity(quantity)} lots)"
+            + (f", ATR× {atr_factor:g}" if atr_factor else "")
+            + "."
         )
 
     def remove_selected(self):
@@ -850,7 +1060,18 @@ class ScreenerApp(tk.Tk):
                     continue
                 cost = float(row[1]) if len(row) > 1 and row[1].strip() else 0.0
                 quantity = float(row[2]) if len(row) > 2 and row[2].strip() else 1.0
-                loaded.append({"ticker": ticker, "cost": cost, "quantity": quantity})
+                atr_multiplier = None
+                if len(row) > 3 and row[3].strip():
+                    try:
+                        atr_multiplier = float(row[3])
+                    except ValueError:
+                        atr_multiplier = None
+                loaded.append({
+                    "ticker": ticker,
+                    "cost": cost,
+                    "quantity": quantity,
+                    "atr_multiplier": atr_multiplier,
+                })
         except ValueError:
             # Fallback: support legacy CSV that only listed tickers
             loaded = []
@@ -858,7 +1079,7 @@ class ScreenerApp(tk.Tk):
                 for cell in row:
                     ticker = cell.strip().upper()
                     if ticker and ticker != "TICKER":
-                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0})
+                        loaded.append({"ticker": ticker, "cost": 0.0, "quantity": 1.0, "atr_multiplier": None})
 
         unique: dict[str, dict[str, object]] = {}
         for item in loaded:
@@ -875,9 +1096,22 @@ class ScreenerApp(tk.Tk):
         try:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Ticker", "Cost", "Quantity (lots)"])
+                writer.writerow(["Ticker", "Cost", "Quantity (lots)", "ATR Multiplier"])
                 for item in self.watchlist:
-                    writer.writerow([item["ticker"], item["cost"], item["quantity"]])
+                    atr_value = item.get("atr_multiplier")
+                    if atr_value in (None, ""):
+                        atr_cell = ""
+                    else:
+                        if isinstance(atr_value, (int, float)):
+                            atr_cell = f"{atr_value:g}"
+                        else:
+                            atr_cell = atr_value
+                    writer.writerow([
+                        item["ticker"],
+                        item["cost"],
+                        item["quantity"],
+                        atr_cell,
+                    ])
             self.status.set(f"Saved {len(self.watchlist)} tickers.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save CSV:\n{e}")
@@ -904,6 +1138,7 @@ class ScreenerApp(tk.Tk):
             "drawdown_pct": float(self.dd_var.get()),
             "use_atr": bool(self.use_atr_var.get()),
             "atr_multiple": float(self.atr_var.get()),
+            "risk_target_pct": float(self.risk_target_var.get()),
             "min_triggers": int(self.min_triggers_var.get()),
             "require_volume_confirmation": bool(self.require_volume_var.get()),
             "use_macd_confirmation": bool(self.use_macd_confirm_var.get()),
@@ -924,7 +1159,7 @@ class ScreenerApp(tk.Tk):
 
         def worker():
             for item in watchlist:
-                res = evaluate_ticker(item["ticker"], config)
+                res = evaluate_ticker(item["ticker"], config, item)
                 res.update({"cost": item.get("cost"), "quantity": item.get("quantity")})
                 self.queue.put(res)
             self.queue.put("__DONE__")
@@ -964,6 +1199,7 @@ class ScreenerApp(tk.Tk):
         self.dd_var.set(float(preset["drawdown_pct"]))
         self.use_atr_var.set(int(preset["use_atr"]))
         self.atr_var.set(float(preset["atr_multiple"]))
+        self.risk_target_var.set(DEFAULT_RISK_TARGET_PCT)
         self.min_triggers_var.set(int(preset["min_triggers"]))
         self.require_volume_var.set(int(preset.get("require_volume_confirmation", 0)))
         self.use_macd_confirm_var.set(int(preset.get("use_macd_confirmation", 0)))
@@ -1012,6 +1248,57 @@ class ScreenerApp(tk.Tk):
         macd_text = self._format_check_cell(res.get("macd_confirmation"))
         trend_text = self._format_check_cell(res.get("trend_filter"))
         multi_rsi_text = self._format_check_cell(res.get("multi_rsi"))
+
+        risk_info = res.get("risk") or {}
+        vol_info = res.get("volatility") or {}
+        risk_parts: list[str] = []
+
+        sell_pct = risk_info.get("sell_pct")
+        sell_lots = risk_info.get("sell_lots")
+        if sell_pct is not None:
+            percent = max(0.0, min(float(sell_pct) * 100.0, 100.0))
+            if percent <= 0.1:
+                risk_parts.append("Hold size")
+            else:
+                text = f"Sell {percent:.0f}%"
+                if sell_lots is not None:
+                    try:
+                        text += f" ({float(sell_lots):.2f} lots)"
+                    except (TypeError, ValueError):
+                        pass
+                risk_parts.append(text)
+
+        risk_pct = risk_info.get("risk_pct")
+        target_pct = risk_info.get("risk_target_pct")
+        if risk_pct is not None:
+            if target_pct is not None:
+                risk_parts.append(f"Risk {float(risk_pct):.1f}% (target {float(target_pct):.1f}%)")
+            else:
+                risk_parts.append(f"Risk {float(risk_pct):.1f}%")
+
+        atr_pct = vol_info.get("atr_pct")
+        vol_label = vol_info.get("label")
+        if atr_pct is not None:
+            label = vol_label if vol_label else "ATR"
+            risk_parts.append(f"{label}: {float(atr_pct):.1f}%")
+        elif vol_label:
+            risk_parts.append(str(vol_label))
+
+        atr_multiple = vol_info.get("atr_multiple")
+        if atr_multiple not in (None, ""):
+            try:
+                risk_parts.append(f"ATR× {float(atr_multiple):g}")
+            except (TypeError, ValueError):
+                risk_parts.append(f"ATR× {atr_multiple}")
+
+        stop_level = risk_info.get("stop")
+        if stop_level not in (None, ""):
+            try:
+                risk_parts.append(f"Stop {float(stop_level):.2f}")
+            except (TypeError, ValueError):
+                pass
+
+        risk_text = " | ".join(risk_parts) if risk_parts else "—"
 
         tags = ()
         if res["status"].startswith("Ready"):
@@ -1079,6 +1366,7 @@ class ScreenerApp(tk.Tk):
                 qty_text,
                 gain_text,
                 res["status"],
+                risk_text,
                 volume_text,
                 macd_text,
                 trend_text,
@@ -1102,6 +1390,8 @@ class ScreenerApp(tk.Tk):
             "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
             "Tips:\n"
             "• Use CSV to save/load your watchlist.\n"
+            "• Override ATR× per ticker when you need looser/tighter stops for high- or low-beta names.\n"
+            "• The Risk Sizing column suggests trims using ATR-based stop distance versus your risk target.\n"
             "• Signals are heuristics, not advice. Always research before acting."
         )
         messagebox.showinfo("Help", msg)
@@ -1145,6 +1435,20 @@ class ScreenerApp(tk.Tk):
                 return (False, float(text.replace(",", "")))
             except ValueError:
                 pass
+
+        if column == "risk":
+            sell_match = re.search(r"Sell\s+(\d+(?:\.\d+)?)", text)
+            if sell_match:
+                try:
+                    return (False, float(sell_match.group(1)))
+                except ValueError:
+                    pass
+            risk_match = re.search(r"Risk\s+(\d+(?:\.\d+)?)", text)
+            if risk_match:
+                try:
+                    return (False, float(risk_match.group(1)))
+                except ValueError:
+                    pass
 
         if column == "gain_loss":
             match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text)
