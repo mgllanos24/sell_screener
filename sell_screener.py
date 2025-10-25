@@ -1,559 +1,554 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/sell_screener.py b/sell_screener.py
-index 583f293b988f32a3ca47600393404e50b739d5c8..811c16379ba3402954efec5f2be05e2d50d68bda 100644
---- a/sell_screener.py
-+++ b/sell_screener.py
-@@ -1,45 +1,86 @@
- # sell_screener.py
- # Simple GUI stock "ready-to-sell" screener
- # Not financial advice. For research/education only.
- 
--import threading
--import queue
--import datetime as dt
--import tkinter as tk
--from tkinter import ttk, messagebox, filedialog
--import csv
--import numpy as np
--import pandas as pd
-+import threading
-+import queue
-+import datetime as dt
-+import tkinter as tk
-+from tkinter import ttk, messagebox, filedialog
-+import csv
-+import numpy as np
-+import pandas as pd
- 
- try:
-     import yfinance as yf
- except ImportError:
-     raise SystemExit("Please install dependencies first: pip install yfinance pandas numpy")
- 
--APP_TITLE = "Sell Signal Screener"
--DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
-+APP_TITLE = "Sell Signal Screener"
-+DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
-+MARKET_REFERENCE_TICKER = "^GSPC"
-+MARKET_LOOKBACK_DAYS = 320
-+
-+MARKET_PRESETS = {
-+    "Bullish": {
-+        "use_rsi": True,
-+        "rsi_threshold": 75,
-+        "use_ma": True,
-+        "ma_fast": 12,
-+        "ma_slow": 40,
-+        "use_dd": False,
-+        "drawdown_pct": 12.5,
-+        "use_atr": True,
-+        "atr_multiple": 3.5,
-+        "min_triggers": 2,
-+    },
-+    "Sideways": {
-+        "use_rsi": True,
-+        "rsi_threshold": 70,
-+        "use_ma": True,
-+        "ma_fast": 18,
-+        "ma_slow": 45,
-+        "use_dd": True,
-+        "drawdown_pct": 15.0,
-+        "use_atr": True,
-+        "atr_multiple": 3.0,
-+        "min_triggers": 2,
-+    },
-+    "Bearish": {
-+        "use_rsi": True,
-+        "rsi_threshold": 60,
-+        "use_ma": True,
-+        "ma_fast": 20,
-+        "ma_slow": 50,
-+        "use_dd": True,
-+        "drawdown_pct": 10.0,
-+        "use_atr": True,
-+        "atr_multiple": 2.5,
-+        "min_triggers": 1,
-+    },
-+}
- 
- # ---------- Indicator helpers ----------
- 
- def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-     delta = series.diff()
-     up = np.where(delta > 0, delta, 0.0)
-     down = np.where(delta < 0, -delta, 0.0)
-     roll_up = pd.Series(up, index=series.index).ewm(alpha=1/period, adjust=False).mean()
-     roll_down = pd.Series(down, index=series.index).ewm(alpha=1/period, adjust=False).mean()
-     rs = roll_up / (roll_down.replace(0, np.nan))
-     rsi = 100 - (100 / (1 + rs))
-     return rsi.fillna(0)
- 
- def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-     prev_close = close.shift(1)
-     tr = pd.concat([
-         (high - low).abs(),
-         (high - prev_close).abs(),
-         (low - prev_close).abs()
-     ], axis=1).max(axis=1)
-     return tr.ewm(alpha=1/period, adjust=False).mean()
- 
- def ema(series: pd.Series, period: int) -> pd.Series:
-     return series.ewm(span=period, adjust=False).mean()
- 
-@@ -66,160 +107,200 @@ def rule_ma_bearish_cross(price: pd.Series, fast: int = 20, slow: int = 50) -> d
- 
- def rule_drawdown_from_52w(price: pd.Series, max_dd_pct: float = 15.0) -> dict:
-     # percent off the 252-trading-day high (~1y)
-     window = min(252, len(price))
-     if window < 50:
-         return {"name": f">{max_dd_pct}% below 52w high", "triggered": False, "value": None}
-     rolling_high = price.rolling(window=window).max()
-     dd = (rolling_high.iloc[-1] - price.iloc[-1]) / rolling_high.iloc[-1] * 100.0
-     trig = dd >= max_dd_pct
-     return {"name": f">{max_dd_pct:.0f}% below 52w high", "triggered": bool(trig), "value": round(float(dd), 2)}
- 
- def rule_atr_trailing_stop(high: pd.Series, low: pd.Series, close: pd.Series, multiple: float = 3.0) -> dict:
-     # Simple Chandelier-like exit: stop = highest close(22) - multiple*ATR(14); sell if close < stop
-     period_high = 22
-     a = atr(high, low, close, 14)
-     highest_close = close.rolling(window=period_high).max()
-     stop = highest_close - multiple * a
-     if pd.isna(stop.iloc[-1]):
-         return {"name": f"Close < (Highest{period_high} - {multiple}×ATR)", "triggered": False, "value": None}
-     trig = close.iloc[-1] < stop.iloc[-1]
-     val = f"Close {round(float(close.iloc[-1]),2)} vs Stop {round(float(stop.iloc[-1]),2)}"
-     return {"name": f"ATR trailing stop ({multiple}×)", "triggered": bool(trig), "value": val}
- 
- # ---------- Data ----------
- 
--def fetch_history(ticker: str, period_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
--    end = dt.date.today()
--    start = end - dt.timedelta(days=period_days + 20)
--    df = yf.download(
--        ticker,
-+def fetch_history(ticker: str, period_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
-+    end = dt.date.today()
-+    start = end - dt.timedelta(days=period_days + 20)
-+    df = yf.download(
-+        ticker,
-         start=start.isoformat(),
-         end=end.isoformat(),
-         auto_adjust=True,
-         progress=False,
-         group_by="ticker",
-         threads=True,
-         interval="1d"
-     )
-     if isinstance(df.columns, pd.MultiIndex):
-         # if yfinance returns multiindex for multiple tickers, select first level
-         df = df.xs(ticker, axis=1, level=0, drop_level=False).droplevel(0, axis=1)
--    df = df.dropna()
--    return df
-+    df = df.dropna()
-+    return df
-+
-+
-+def determine_market_condition() -> tuple[str, str]:
-+    """Classify the broad market as Bullish, Sideways, or Bearish."""
-+
-+    df = fetch_history(MARKET_REFERENCE_TICKER, MARKET_LOOKBACK_DAYS)
-+    if df.empty or len(df) < 220:
-+        raise ValueError("Not enough data to determine market condition")
-+
-+    close = df["Close"]
-+    sma50 = sma(close, 50)
-+    sma200 = sma(close, 200)
-+
-+    latest_close = float(close.iloc[-1])
-+    latest_sma50 = float(sma50.iloc[-1])
-+    latest_sma200 = float(sma200.iloc[-1])
-+
-+    if np.isnan(latest_sma50) or np.isnan(latest_sma200):
-+        raise ValueError("Not enough data for moving averages")
-+
-+    ratio_to_200 = latest_close / latest_sma200
-+    sma50_20_ago = float(sma50.iloc[-20]) if not np.isnan(sma50.iloc[-20]) else latest_sma50
-+    slope = (latest_sma50 - sma50_20_ago) / sma50_20_ago if sma50_20_ago else 0.0
-+
-+    if latest_close > latest_sma200 and latest_sma50 >= latest_sma200 and slope >= 0:
-+        condition = "Bullish"
-+    elif latest_close < latest_sma200 and latest_sma50 <= latest_sma200 and slope <= 0:
-+        condition = "Bearish"
-+    else:
-+        condition = "Sideways"
-+
-+    pct_to_200 = (ratio_to_200 - 1.0) * 100.0
-+    slope_pct = slope * 100.0
-+    detail = f"Close vs SMA200: {pct_to_200:+.2f}% | SMA50 slope (20d): {slope_pct:+.2f}%"
-+    return condition, detail
- 
- # ---------- Screening logic ----------
- 
- def evaluate_ticker(ticker: str, config: dict) -> dict:
-     try:
-         df = fetch_history(ticker)
-         if df.empty or len(df) < 50:
-             return {"ticker": ticker, "status": "Insufficient data", "ready": False, "price": None, "rules": []}
- 
-         close = df["Close"]
-         high = df["High"]
-         low = df["Low"]
- 
-         results = []
- 
-         if config["use_rsi"]:
-             results.append(rule_rsi_overbought_cross(close, config["rsi_threshold"]))
- 
-         if config["use_ma"]:
-             results.append(rule_ma_bearish_cross(close, config["ma_fast"], config["ma_slow"]))
- 
-         if config["use_dd"]:
-             results.append(rule_drawdown_from_52w(close, config["drawdown_pct"]))
- 
-         if config["use_atr"]:
-             results.append(rule_atr_trailing_stop(high, low, close, config["atr_multiple"]))
- 
-         triggered = [r for r in results if r["triggered"]]
-         ready = len(triggered) >= config["min_triggers"]
- 
-         last_price = float(close.iloc[-1])
-         status = "Ready to SELL" if ready else "Hold/Review"
- 
-         return {
-             "ticker": ticker.upper(),
-             "status": status,
-             "ready": ready,
-             "price": round(last_price, 2),
-             "rules": results
-         }
-     except Exception as e:
-         return {"ticker": ticker, "status": f"Error: {e}", "ready": False, "price": None, "rules": []}
- 
- # ---------- GUI ----------
- 
- class ScreenerApp(tk.Tk):
--    def __init__(self):
--        super().__init__()
--        self.title(APP_TITLE)
--        self.geometry("980x640")
--        self.minsize(900, 600)
--
--        self.tickers = tk.StringVar(value="")
--        self.queue = queue.Queue()
--
--        self._build_controls()
--        self._build_table()
--        self._build_status()
--
--        # defaults
--        self.use_rsi_var.set(1)
--        self.rsi_thr_var.set(70)
--        self.use_ma_var.set(1)
--        self.fast_var.set(20)
-+    def __init__(self):
-+        super().__init__()
-+        self.title(APP_TITLE)
-+        self.geometry("900x560")
-+        self.minsize(820, 520)
-+
-+        self.tickers = tk.StringVar(value="")
-+        self.queue = queue.Queue()
-+        self.market_condition_var = tk.StringVar(value="Market: Checking…")
-+
-+        self._build_controls()
-+        self._build_table()
-+        self._build_status()
-+
-+        # defaults
-+        self.use_rsi_var.set(1)
-+        self.rsi_thr_var.set(70)
-+        self.use_ma_var.set(1)
-+        self.fast_var.set(20)
-         self.slow_var.set(50)
-         self.use_dd_var.set(0)
-         self.dd_var.set(15)
--        self.use_atr_var.set(1)
--        self.atr_var.set(3.0)
--        self.min_triggers_var.set(1)
--
--        self.after(200, self._poll_queue)
-+        self.use_atr_var.set(1)
-+        self.atr_var.set(3.0)
-+        self.min_triggers_var.set(1)
-+
-+        self.after(200, self._poll_queue)
-+        self.refresh_market_condition()
- 
-     def _build_controls(self):
-         frm = ttk.LabelFrame(self, text="Watchlist & Rules", padding=10)
-         frm.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
- 
-         # Watchlist entry
-         ttk.Label(frm, text="Add ticker:").grid(row=0, column=0, sticky="w")
-         self.ticker_entry = ttk.Entry(frm, width=14)
-         self.ticker_entry.grid(row=0, column=1, padx=(4, 12))
-         ttk.Button(frm, text="Add", command=self.add_ticker).grid(row=0, column=2)
-         ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=3, padx=(12, 0))
-         ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=4, padx=(12, 0))
-         ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=5, padx=(6, 0))
--        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=6, padx=(24, 0))
--        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=7, padx=(6, 0))
-+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=6, padx=(24, 0))
-+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=7, padx=(6, 0))
-+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=8, padx=(18, 0))
- 
-         # Listbox of tickers
--        self.listbox = tk.Listbox(frm, listvariable=self.tickers, height=6, selectmode=tk.EXTENDED)
--        self.listbox.grid(row=1, column=0, columnspan=3, padx=(0, 12), pady=(8, 0), sticky="nsew")
--        frm.grid_columnconfigure(1, weight=1)
-+        self.listbox = tk.Listbox(frm, listvariable=self.tickers, height=6, selectmode=tk.EXTENDED)
-+        self.listbox.grid(row=1, column=0, columnspan=3, padx=(0, 12), pady=(8, 0), sticky="nsew")
-+        frm.grid_columnconfigure(1, weight=1)
-+
-+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=9, sticky="w", pady=(8, 0))
- 
-         # Rules panel
-         rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
-         rules.grid(row=1, column=3, columnspan=5, sticky="nsew", pady=(8, 0))
-         for c in range(5):
-             rules.grid_columnconfigure(c, weight=1)
- 
-         # RSI
-         self.use_rsi_var = tk.IntVar(value=1)
-         ttk.Checkbutton(rules, text="RSI cross down", variable=self.use_rsi_var).grid(row=0, column=0, sticky="w")
-         ttk.Label(rules, text="Threshold").grid(row=0, column=1, sticky="e")
-         self.rsi_thr_var = tk.IntVar(value=70)
-         ttk.Spinbox(rules, from_=50, to=90, textvariable=self.rsi_thr_var, width=5).grid(row=0, column=2, sticky="w")
- 
-         # MA cross
-         self.use_ma_var = tk.IntVar(value=1)
-         ttk.Checkbutton(rules, text="EMA fast crosses below SMA slow", variable=self.use_ma_var).grid(row=1, column=0, sticky="w", pady=(4,0))
-         ttk.Label(rules, text="Fast").grid(row=1, column=1, sticky="e")
-         self.fast_var = tk.IntVar(value=20)
-         ttk.Spinbox(rules, from_=5, to=50, textvariable=self.fast_var, width=5).grid(row=1, column=2, sticky="w")
-         ttk.Label(rules, text="Slow").grid(row=1, column=3, sticky="e")
-         self.slow_var = tk.IntVar(value=50)
-         ttk.Spinbox(rules, from_=20, to=250, textvariable=self.slow_var, width=5).grid(row=1, column=4, sticky="w")
- 
-         # Drawdown
-@@ -248,55 +329,76 @@ class ScreenerApp(tk.Tk):
-         columns = ("ticker", "price", "status", "signals")
-         self.tree = ttk.Treeview(container, columns=columns, show="headings")
-         self.tree.heading("ticker", text="Ticker")
-         self.tree.heading("price", text="Last Price")
-         self.tree.heading("status", text="Result")
-         self.tree.heading("signals", text="Signals / Values")
- 
-         self.tree.column("ticker", width=100, anchor=tk.CENTER)
-         self.tree.column("price", width=110, anchor=tk.E)
-         self.tree.column("status", width=150, anchor=tk.CENTER)
-         self.tree.column("signals", width=600, anchor=tk.W)
- 
-         vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
-         self.tree.configure(yscroll=vsb.set)
-         self.tree.grid(row=0, column=0, sticky="nsew")
-         vsb.grid(row=0, column=1, sticky="ns")
-         container.grid_rowconfigure(0, weight=1)
-         container.grid_columnconfigure(0, weight=1)
- 
-         # color tags
-         self.tree.tag_configure("ready", foreground="#b00020")     # red-ish
-         self.tree.tag_configure("hold", foreground="#006400")       # green-ish
-         self.tree.tag_configure("warn", foreground="#8B8000")       # dark golden
- 
-     def _build_status(self):
--        self.status = tk.StringVar(value="Add tickers and click Scan.")
--        bar = ttk.Label(self, textvariable=self.status, anchor="w")
--        bar.pack(fill=tk.X, padx=10, pady=(0,10))
--
--    # ---------- Actions ----------
-+        self.status = tk.StringVar(value="Add tickers and click Scan.")
-+        bar = ttk.Label(self, textvariable=self.status, anchor="w")
-+        bar.pack(fill=tk.X, padx=10, pady=(0,10))
-+
-+    # ---------- Actions ----------
-+
-+    def refresh_market_condition(self):
-+        self.market_condition_var.set("Market: Checking…")
-+        threading.Thread(target=self._fetch_market_condition, args=(False,), daemon=True).start()
-+
-+    def auto_adjust_to_market(self):
-+        self.status.set("Detecting market condition…")
-+        self.market_condition_var.set("Market: Checking…")
-+        threading.Thread(target=self._fetch_market_condition, args=(True,), daemon=True).start()
-+
-+    def _fetch_market_condition(self, apply_preset: bool):
-+        try:
-+            condition, detail = determine_market_condition()
-+            self.queue.put({
-+                "type": "MARKET",
-+                "condition": condition,
-+                "detail": detail,
-+                "apply": apply_preset,
-+            })
-+        except Exception as exc:
-+            self.queue.put({"type": "MARKET_ERROR", "error": str(exc), "apply": apply_preset})
- 
-     def add_ticker(self):
-         t = self.ticker_entry.get().strip().upper()
-         if not t:
-             return
-         current = list(self.listbox.get(0, tk.END))
-         if t not in current:
-             self.listbox.insert(tk.END, t)
-             self.ticker_entry.delete(0, tk.END)
- 
-     def remove_selected(self):
-         sel = list(self.listbox.curselection())
-         for idx in reversed(sel):
-             self.listbox.delete(idx)
- 
-     def load_csv(self):
-         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
-         if not path:
-             return
-         try:
-             with open(path, newline="") as f:
-                 reader = csv.reader(f)
-                 tickers = []
-                 for row in reader:
-                     tickers.extend([c.strip().upper() for c in row if c.strip()])
-@@ -342,69 +444,109 @@ class ScreenerApp(tk.Tk):
-             "min_triggers": int(self.min_triggers_var.get())
-         }
- 
-     def scan(self):
-         tickers = list(self.listbox.get(0, tk.END))
-         if not tickers:
-             messagebox.showinfo("No tickers", "Add one or more tickers first.")
-             return
- 
-         config = self.get_config()
-         self.tree.delete(*self.tree.get_children())
-         self.status.set("Scanning…")
- 
-         def worker():
-             for t in tickers:
-                 res = evaluate_ticker(t, config)
-                 self.queue.put(res)
-             self.queue.put("__DONE__")
- 
-         threading.Thread(target=worker, daemon=True).start()
- 
-     def _poll_queue(self):
-         try:
-             while True:
-                 item = self.queue.get_nowait()
--                if item == "__DONE__":
--                    self.status.set("Scan complete.")
--                    break
--                self._add_result_row(item)
--        except queue.Empty:
--            pass
--        finally:
--            self.after(150, self._poll_queue)
--
--    def _add_result_row(self, res: dict):
--        sig_texts = []
--        for r in res["rules"]:
--            mark = "✅" if r["triggered"] else "—"
--            val = "" if r["value"] is None else f" ({r['value']})"
--            sig_texts.append(f"{mark} {r['name']}{val}")
--        sig_col = " | ".join(sig_texts) if sig_texts else "No rules evaluated"
--
--        tags = ()
--        if res["status"].startswith("Ready"):
--            tags = ("ready",)
--        elif res["status"].startswith("Error"):
--            tags = ("warn",)
--        else:
--            tags = ("hold",)
--
--        self.tree.insert("", tk.END, values=(res["ticker"], res["price"], res["status"], sig_col), tags=tags)
-+                if item == "__DONE__":
-+                    self.status.set("Scan complete.")
-+                    break
-+                if isinstance(item, dict) and item.get("type") == "MARKET":
-+                    self._handle_market_message(item)
-+                    continue
-+                if isinstance(item, dict) and item.get("type") == "MARKET_ERROR":
-+                    self._handle_market_error(item)
-+                    continue
-+                self._add_result_row(item)
-+        except queue.Empty:
-+            pass
-+        finally:
-+            self.after(150, self._poll_queue)
-+
-+    def _add_result_row(self, res: dict):
-+        sig_texts = []
-+        for r in res["rules"]:
-+            mark = "✅" if r["triggered"] else "—"
-+            val = "" if r["value"] is None else f" ({r['value']})"
-+            sig_texts.append(f"{mark} {r['name']}{val}")
-+        sig_col = " | ".join(sig_texts) if sig_texts else "No rules evaluated"
-+
-+        tags = ()
-+        if res["status"].startswith("Ready"):
-+            tags = ("ready",)
-+        elif res["status"].startswith("Error"):
-+            tags = ("warn",)
-+        else:
-+            tags = ("hold",)
-+
-+        self.tree.insert("", tk.END, values=(res["ticker"], res["price"], res["status"], sig_col), tags=tags)
-+
-+    def _apply_market_preset(self, condition: str):
-+        preset = MARKET_PRESETS.get(condition)
-+        if not preset:
-+            return
-+
-+        self.use_rsi_var.set(int(preset["use_rsi"]))
-+        self.rsi_thr_var.set(int(preset["rsi_threshold"]))
-+        self.use_ma_var.set(int(preset["use_ma"]))
-+        self.fast_var.set(int(preset["ma_fast"]))
-+        self.slow_var.set(int(preset["ma_slow"]))
-+        self.use_dd_var.set(int(preset["use_dd"]))
-+        self.dd_var.set(float(preset["drawdown_pct"]))
-+        self.use_atr_var.set(int(preset["use_atr"]))
-+        self.atr_var.set(float(preset["atr_multiple"]))
-+        self.min_triggers_var.set(int(preset["min_triggers"]))
-+
-+    def _handle_market_message(self, item: dict):
-+        condition = item["condition"]
-+        detail = item["detail"]
-+        apply = item["apply"]
-+        self.market_condition_var.set(f"Market: {condition} — {detail}")
-+        if apply:
-+            self._apply_market_preset(condition)
-+            self.status.set(f"Applied {condition} preset based on market condition.")
-+        else:
-+            self.status.set("Market condition updated.")
-+
-+    def _handle_market_error(self, item: dict):
-+        self.market_condition_var.set("Market: Unable to determine (see status)")
-+        if item.get("apply"):
-+            self.status.set(f"Failed to auto-adjust: {item.get('error')}")
-+        else:
-+            self.status.set(f"Failed to refresh market info: {item.get('error')}")
- 
-     def show_help(self):
-         msg = (
-             "How it works:\n"
-             "• RSI cross down: flags when RSI(14) drops back below your threshold (default 70).\n"
-             "• EMA/SMA cross: flags when EMA(fast) crosses below SMA(slow) (default 20 vs 50).\n"
-             "• 52-week drawdown: flags if price is ≥ your % below the 52-week high.\n"
-             "• ATR trailing stop: flags when close falls below (highest 22-day close − N×ATR(14)).\n\n"
-             "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
-             "Tips:\n"
-             "• Use CSV to save/load your watchlist.\n"
-             "• Signals are heuristics, not advice. Always research before acting."
-         )
-         messagebox.showinfo("Help", msg)
- 
- if __name__ == "__main__":
-     app = ScreenerApp()
-     app.mainloop()
- 
-EOF
-)
+# sell_screener.py
+# Simple GUI stock "ready-to-sell" screener
+# Not financial advice. For research/education only.
+
+import threading
+import queue
+import datetime as dt
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import csv
+import numpy as np
+import pandas as pd
+
+try:
+    import yfinance as yf
+except ImportError:
+    raise SystemExit("Please install dependencies first: pip install yfinance pandas numpy")
+
+APP_TITLE = "Sell Signal Screener"
+DEFAULT_LOOKBACK_DAYS = 420  # ~1.6 years, gives room for 52-week metrics
+MARKET_REFERENCE_TICKER = "^GSPC"
+MARKET_LOOKBACK_DAYS = 320
+
+MARKET_PRESETS = {
+    "Bullish": {
+        "use_rsi": True,
+        "rsi_threshold": 75,
+        "use_ma": True,
+        "ma_fast": 12,
+        "ma_slow": 40,
+        "use_dd": False,
+        "drawdown_pct": 12.5,
+        "use_atr": True,
+        "atr_multiple": 3.5,
+        "min_triggers": 2,
+    },
+    "Sideways": {
+        "use_rsi": True,
+        "rsi_threshold": 70,
+        "use_ma": True,
+        "ma_fast": 18,
+        "ma_slow": 45,
+        "use_dd": True,
+        "drawdown_pct": 15.0,
+        "use_atr": True,
+        "atr_multiple": 3.0,
+        "min_triggers": 2,
+    },
+    "Bearish": {
+        "use_rsi": True,
+        "rsi_threshold": 60,
+        "use_ma": True,
+        "ma_fast": 20,
+        "ma_slow": 50,
+        "use_dd": True,
+        "drawdown_pct": 10.0,
+        "use_atr": True,
+        "atr_multiple": 2.5,
+        "min_triggers": 1,
+    },
+}
+
+# ---------- Indicator helpers ----------
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up, index=series.index).ewm(alpha=1/period, adjust=False).mean()
+    roll_down = pd.Series(down, index=series.index).ewm(alpha=1/period, adjust=False).mean()
+    rs = roll_up / (roll_down.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(0)
+
+def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
+
+def ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+def sma(series: pd.Series, period: int) -> pd.Series:
+    return series.rolling(window=period, min_periods=period).mean()
+
+# ---------- Sell rules ----------
+
+def rule_rsi_overbought_cross(price: pd.Series, threshold: int = 70) -> dict:
+    r = rsi(price, 14)
+    # True when RSI is currently < threshold but was recently above => crossed down
+    crossed = (r.iloc[-2] >= threshold) and (r.iloc[-1] < threshold)
+    return {"name": f"RSI cross below {threshold}", "triggered": bool(crossed), "value": round(float(r.iloc[-1]), 2)}
+
+def rule_ma_bearish_cross(price: pd.Series, fast: int = 20, slow: int = 50) -> dict:
+    f = ema(price, fast)
+    s = sma(price, slow)
+    if pd.isna(s.iloc[-1]) or pd.isna(s.iloc[-2]):
+        return {"name": f"EMA{fast}↓SMA{slow}", "triggered": False, "value": None}
+    # Bearish cross: fast was above and now below slow
+    crossed = (f.iloc[-2] > s.iloc[-2]) and (f.iloc[-1] < s.iloc[-1])
+    val = f"{round(float(f.iloc[-1]),2)} vs {round(float(s.iloc[-1]),2)}"
+    return {"name": f"EMA{fast}↓SMA{slow} cross", "triggered": bool(crossed), "value": val}
+
+def rule_drawdown_from_52w(price: pd.Series, max_dd_pct: float = 15.0) -> dict:
+    # percent off the 252-trading-day high (~1y)
+    window = min(252, len(price))
+    if window < 50:
+        return {"name": f">{max_dd_pct}% below 52w high", "triggered": False, "value": None}
+    rolling_high = price.rolling(window=window).max()
+    dd = (rolling_high.iloc[-1] - price.iloc[-1]) / rolling_high.iloc[-1] * 100.0
+    trig = dd >= max_dd_pct
+    return {"name": f">{max_dd_pct:.0f}% below 52w high", "triggered": bool(trig), "value": round(float(dd), 2)}
+
+def rule_atr_trailing_stop(high: pd.Series, low: pd.Series, close: pd.Series, multiple: float = 3.0) -> dict:
+    # Simple Chandelier-like exit: stop = highest close(22) - multiple*ATR(14); sell if close < stop
+    period_high = 22
+    a = atr(high, low, close, 14)
+    highest_close = close.rolling(window=period_high).max()
+    stop = highest_close - multiple * a
+    if pd.isna(stop.iloc[-1]):
+        return {"name": f"Close < (Highest{period_high} - {multiple}×ATR)", "triggered": False, "value": None}
+    trig = close.iloc[-1] < stop.iloc[-1]
+    val = f"Close {round(float(close.iloc[-1]),2)} vs Stop {round(float(stop.iloc[-1]),2)}"
+    return {"name": f"ATR trailing stop ({multiple}×)", "triggered": bool(trig), "value": val}
+
+# ---------- Data ----------
+
+def fetch_history(ticker: str, period_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
+    end = dt.date.today()
+    start = end - dt.timedelta(days=period_days + 20)
+    df = yf.download(
+        ticker,
+        start=start.isoformat(),
+        end=end.isoformat(),
+        auto_adjust=True,
+        progress=False,
+        group_by="ticker",
+        threads=True,
+        interval="1d"
+    )
+    if isinstance(df.columns, pd.MultiIndex):
+        # if yfinance returns multiindex for multiple tickers, select first level
+        df = df.xs(ticker, axis=1, level=0, drop_level=False).droplevel(0, axis=1)
+    df = df.dropna()
+    return df
+
+
+def determine_market_condition() -> tuple[str, str]:
+    """Classify the broad market as Bullish, Sideways, or Bearish."""
+
+    df = fetch_history(MARKET_REFERENCE_TICKER, MARKET_LOOKBACK_DAYS)
+    if df.empty or len(df) < 220:
+        raise ValueError("Not enough data to determine market condition")
+
+    close = df["Close"]
+    sma50 = sma(close, 50)
+    sma200 = sma(close, 200)
+
+    latest_close = float(close.iloc[-1])
+    latest_sma50 = float(sma50.iloc[-1])
+    latest_sma200 = float(sma200.iloc[-1])
+
+    if np.isnan(latest_sma50) or np.isnan(latest_sma200):
+        raise ValueError("Not enough data for moving averages")
+
+    ratio_to_200 = latest_close / latest_sma200
+    sma50_20_ago = float(sma50.iloc[-20]) if not np.isnan(sma50.iloc[-20]) else latest_sma50
+    slope = (latest_sma50 - sma50_20_ago) / sma50_20_ago if sma50_20_ago else 0.0
+
+    if latest_close > latest_sma200 and latest_sma50 >= latest_sma200 and slope >= 0:
+        condition = "Bullish"
+    elif latest_close < latest_sma200 and latest_sma50 <= latest_sma200 and slope <= 0:
+        condition = "Bearish"
+    else:
+        condition = "Sideways"
+
+    pct_to_200 = (ratio_to_200 - 1.0) * 100.0
+    slope_pct = slope * 100.0
+    detail = f"Close vs SMA200: {pct_to_200:+.2f}% | SMA50 slope (20d): {slope_pct:+.2f}%"
+    return condition, detail
+
+# ---------- Screening logic ----------
+
+def evaluate_ticker(ticker: str, config: dict) -> dict:
+    try:
+        df = fetch_history(ticker)
+        if df.empty or len(df) < 50:
+            return {"ticker": ticker, "status": "Insufficient data", "ready": False, "price": None, "rules": []}
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+
+        results = []
+
+        if config["use_rsi"]:
+            results.append(rule_rsi_overbought_cross(close, config["rsi_threshold"]))
+
+        if config["use_ma"]:
+            results.append(rule_ma_bearish_cross(close, config["ma_fast"], config["ma_slow"]))
+
+        if config["use_dd"]:
+            results.append(rule_drawdown_from_52w(close, config["drawdown_pct"]))
+
+        if config["use_atr"]:
+            results.append(rule_atr_trailing_stop(high, low, close, config["atr_multiple"]))
+
+        triggered = [r for r in results if r["triggered"]]
+        ready = len(triggered) >= config["min_triggers"]
+
+        last_price = float(close.iloc[-1])
+        status = "Ready to SELL" if ready else "Hold/Review"
+
+        return {
+            "ticker": ticker.upper(),
+            "status": status,
+            "ready": ready,
+            "price": round(last_price, 2),
+            "rules": results
+        }
+    except Exception as e:
+        return {"ticker": ticker, "status": f"Error: {e}", "ready": False, "price": None, "rules": []}
+
+# ---------- GUI ----------
+
+class ScreenerApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("900x560")
+        self.minsize(820, 520)
+
+        self.tickers = tk.StringVar(value="")
+        self.queue = queue.Queue()
+        self.market_condition_var = tk.StringVar(value="Market: Checking…")
+
+        self._build_controls()
+        self._build_table()
+        self._build_status()
+
+        # defaults
+        self.use_rsi_var.set(1)
+        self.rsi_thr_var.set(70)
+        self.use_ma_var.set(1)
+        self.fast_var.set(20)
+        self.slow_var.set(50)
+        self.use_dd_var.set(0)
+        self.dd_var.set(15)
+        self.use_atr_var.set(1)
+        self.atr_var.set(3.0)
+        self.min_triggers_var.set(1)
+
+        self.after(200, self._poll_queue)
+        self.refresh_market_condition()
+
+    def _build_controls(self):
+        frm = ttk.LabelFrame(self, text="Watchlist & Rules", padding=10)
+        frm.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        # Watchlist entry
+        ttk.Label(frm, text="Add ticker:").grid(row=0, column=0, sticky="w")
+        self.ticker_entry = ttk.Entry(frm, width=14)
+        self.ticker_entry.grid(row=0, column=1, padx=(4, 12))
+        ttk.Button(frm, text="Add", command=self.add_ticker).grid(row=0, column=2)
+        ttk.Button(frm, text="Remove Selected", command=self.remove_selected).grid(row=0, column=3, padx=(12, 0))
+        ttk.Button(frm, text="Load CSV", command=self.load_csv).grid(row=0, column=4, padx=(12, 0))
+        ttk.Button(frm, text="Save CSV", command=self.save_csv).grid(row=0, column=5, padx=(6, 0))
+        ttk.Button(frm, text="Scan", command=self.scan).grid(row=0, column=6, padx=(24, 0))
+        ttk.Button(frm, text="Help", command=self.show_help).grid(row=0, column=7, padx=(6, 0))
+        ttk.Button(frm, text="Auto Adjust to Market", command=self.auto_adjust_to_market).grid(row=0, column=8, padx=(18, 0))
+
+        # Listbox of tickers
+        self.listbox = tk.Listbox(frm, listvariable=self.tickers, height=6, selectmode=tk.EXTENDED)
+        self.listbox.grid(row=1, column=0, columnspan=3, padx=(0, 12), pady=(8, 0), sticky="nsew")
+        frm.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(frm, textvariable=self.market_condition_var).grid(row=2, column=0, columnspan=9, sticky="w", pady=(8, 0))
+
+        # Rules panel
+        rules = ttk.LabelFrame(frm, text="Sell Rules", padding=10)
+        rules.grid(row=1, column=3, columnspan=5, sticky="nsew", pady=(8, 0))
+        for c in range(5):
+            rules.grid_columnconfigure(c, weight=1)
+
+        # RSI
+        self.use_rsi_var = tk.IntVar(value=1)
+        ttk.Checkbutton(rules, text="RSI cross down", variable=self.use_rsi_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(rules, text="Threshold").grid(row=0, column=1, sticky="e")
+        self.rsi_thr_var = tk.IntVar(value=70)
+        ttk.Spinbox(rules, from_=50, to=90, textvariable=self.rsi_thr_var, width=5).grid(row=0, column=2, sticky="w")
+
+        # MA cross
+        self.use_ma_var = tk.IntVar(value=1)
+        ttk.Checkbutton(rules, text="EMA fast crosses below SMA slow", variable=self.use_ma_var).grid(row=1, column=0, sticky="w", pady=(4,0))
+        ttk.Label(rules, text="Fast").grid(row=1, column=1, sticky="e")
+        self.fast_var = tk.IntVar(value=20)
+        ttk.Spinbox(rules, from_=5, to=50, textvariable=self.fast_var, width=5).grid(row=1, column=2, sticky="w")
+        ttk.Label(rules, text="Slow").grid(row=1, column=3, sticky="e")
+        self.slow_var = tk.IntVar(value=50)
+        ttk.Spinbox(rules, from_=20, to=250, textvariable=self.slow_var, width=5).grid(row=1, column=4, sticky="w")
+
+        # Drawdown
+        self.use_dd_var = tk.IntVar(value=0)
+        ttk.Checkbutton(rules, text="Below 52w high by at least", variable=self.use_dd_var).grid(row=2, column=0, sticky="w", pady=(4,0))
+        self.dd_var = tk.DoubleVar(value=15.0)
+        ttk.Spinbox(rules, from_=5, to=60, increment=0.5, textvariable=self.dd_var, width=6).grid(row=2, column=1, sticky="w")
+        ttk.Label(rules, text="%").grid(row=2, column=2, sticky="w")
+
+        # ATR trailing stop
+        self.use_atr_var = tk.IntVar(value=1)
+        ttk.Checkbutton(rules, text="ATR trailing stop (close < highest(22) - N×ATR)", variable=self.use_atr_var).grid(row=3, column=0, sticky="w", pady=(4,0))
+        self.atr_var = tk.DoubleVar(value=3.0)
+        ttk.Label(rules, text="N=").grid(row=3, column=1, sticky="e")
+        ttk.Spinbox(rules, from_=1.0, to=5.0, increment=0.5, textvariable=self.atr_var, width=6).grid(row=3, column=2, sticky="w")
+
+        # Min triggers
+        ttk.Label(rules, text="Min signals to flag as 'Ready to SELL'").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.min_triggers_var = tk.IntVar(value=1)
+        ttk.Spinbox(rules, from_=1, to=4, textvariable=self.min_triggers_var, width=6).grid(row=4, column=1, sticky="w", pady=(8, 0))
+
+    def _build_table(self):
+        container = ttk.Frame(self)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
+
+        columns = ("ticker", "price", "status", "signals")
+        self.tree = ttk.Treeview(container, columns=columns, show="headings")
+        self.tree.heading("ticker", text="Ticker")
+        self.tree.heading("price", text="Last Price")
+        self.tree.heading("status", text="Result")
+        self.tree.heading("signals", text="Signals / Values")
+
+        self.tree.column("ticker", width=100, anchor=tk.CENTER)
+        self.tree.column("price", width=110, anchor=tk.E)
+        self.tree.column("status", width=150, anchor=tk.CENTER)
+        self.tree.column("signals", width=600, anchor=tk.W)
+
+        vsb = ttk.Scrollbar(container, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=vsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        # color tags
+        self.tree.tag_configure("ready", foreground="#b00020")     # red-ish
+        self.tree.tag_configure("hold", foreground="#006400")       # green-ish
+        self.tree.tag_configure("warn", foreground="#8B8000")       # dark golden
+
+    def _build_status(self):
+        self.status = tk.StringVar(value="Add tickers and click Scan.")
+        bar = ttk.Label(self, textvariable=self.status, anchor="w")
+        bar.pack(fill=tk.X, padx=10, pady=(0,10))
+
+    # ---------- Actions ----------
+
+    def refresh_market_condition(self):
+        self.market_condition_var.set("Market: Checking…")
+        threading.Thread(target=self._fetch_market_condition, args=(False,), daemon=True).start()
+
+    def auto_adjust_to_market(self):
+        self.status.set("Detecting market condition…")
+        self.market_condition_var.set("Market: Checking…")
+        threading.Thread(target=self._fetch_market_condition, args=(True,), daemon=True).start()
+
+    def _fetch_market_condition(self, apply_preset: bool):
+        try:
+            condition, detail = determine_market_condition()
+            self.queue.put(
+                {
+                    "type": "MARKET",
+                    "condition": condition,
+                    "detail": detail,
+                    "apply": apply_preset,
+                }
+            )
+        except Exception as exc:
+            self.queue.put({"type": "MARKET_ERROR", "error": str(exc), "apply": apply_preset})
+
+    def add_ticker(self):
+        t = self.ticker_entry.get().strip().upper()
+        if not t:
+            return
+        current = list(self.listbox.get(0, tk.END))
+        if t not in current:
+            self.listbox.insert(tk.END, t)
+            self.ticker_entry.delete(0, tk.END)
+
+    def remove_selected(self):
+        sel = list(self.listbox.curselection())
+        for idx in reversed(sel):
+            self.listbox.delete(idx)
+
+    def load_csv(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            with open(path, newline="") as f:
+                reader = csv.reader(f)
+                tickers = []
+                for row in reader:
+                    tickers.extend([c.strip().upper() for c in row if c.strip()])
+            self.listbox.delete(0, tk.END)
+            for t in sorted(set(tickers)):
+                self.listbox.insert(tk.END, t)
+            self.status.set(f"Loaded {len(tickers)} tickers.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load CSV:\n{e}")
+
+    def save_csv(self):
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            items = list(self.listbox.get(0, tk.END))
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(items)
+            self.status.set(f"Saved {len(items)} tickers.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save CSV:\n{e}")
+
+    def get_config(self) -> dict:
+        # Validate MA fast/slow
+        fast = int(self.fast_var.get())
+        slow = int(self.slow_var.get())
+        if fast >= slow:
+            messagebox.showwarning("Rule Warning", "EMA fast should be less than SMA slow. Adjusted automatically.")
+            fast = min(fast, slow - 1)
+            self.fast_var.set(fast)
+
+        return {
+            "use_rsi": bool(self.use_rsi_var.get()),
+            "rsi_threshold": int(self.rsi_thr_var.get()),
+            "use_ma": bool(self.use_ma_var.get()),
+            "ma_fast": fast,
+            "ma_slow": slow,
+            "use_dd": bool(self.use_dd_var.get()),
+            "drawdown_pct": float(self.dd_var.get()),
+            "use_atr": bool(self.use_atr_var.get()),
+            "atr_multiple": float(self.atr_var.get()),
+            "min_triggers": int(self.min_triggers_var.get())
+        }
+
+    def scan(self):
+        tickers = list(self.listbox.get(0, tk.END))
+        if not tickers:
+            messagebox.showinfo("No tickers", "Add one or more tickers first.")
+            return
+
+        config = self.get_config()
+        self.tree.delete(*self.tree.get_children())
+        self.status.set("Scanning…")
+
+        def worker():
+            for t in tickers:
+                res = evaluate_ticker(t, config)
+                self.queue.put(res)
+            self.queue.put("__DONE__")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_queue(self):
+        try:
+            while True:
+                item = self.queue.get_nowait()
+                if item == "__DONE__":
+                    self.status.set("Scan complete.")
+                    break
+                if isinstance(item, dict) and item.get("type") == "MARKET":
+                    self._handle_market_message(item)
+                    continue
+                if isinstance(item, dict) and item.get("type") == "MARKET_ERROR":
+                    self._handle_market_error(item)
+                    continue
+                self._add_result_row(item)
+        except queue.Empty:
+            pass
+        finally:
+            self.after(150, self._poll_queue)
+
+    def _apply_market_preset(self, condition: str):
+        preset = MARKET_PRESETS.get(condition)
+        if not preset:
+            return
+
+        self.use_rsi_var.set(int(preset["use_rsi"]))
+        self.rsi_thr_var.set(int(preset["rsi_threshold"]))
+        self.use_ma_var.set(int(preset["use_ma"]))
+        self.fast_var.set(int(preset["ma_fast"]))
+        self.slow_var.set(int(preset["ma_slow"]))
+        self.use_dd_var.set(int(preset["use_dd"]))
+        self.dd_var.set(float(preset["drawdown_pct"]))
+        self.use_atr_var.set(int(preset["use_atr"]))
+        self.atr_var.set(float(preset["atr_multiple"]))
+        self.min_triggers_var.set(int(preset["min_triggers"]))
+
+    def _handle_market_message(self, item: dict):
+        condition = item["condition"]
+        detail = item["detail"]
+        apply = item.get("apply", False)
+        self.market_condition_var.set(f"Market: {condition} — {detail}")
+        if apply:
+            self._apply_market_preset(condition)
+            self.status.set(f"Applied {condition} preset based on market condition.")
+        else:
+            self.status.set("Market condition updated.")
+
+    def _handle_market_error(self, item: dict):
+        self.market_condition_var.set("Market: Unable to determine (see status)")
+        if item.get("apply"):
+            self.status.set(f"Failed to auto-adjust: {item.get('error')}")
+        else:
+            self.status.set(f"Failed to refresh market info: {item.get('error')}")
+
+    def _add_result_row(self, res: dict):
+        sig_texts = []
+        for r in res["rules"]:
+            mark = "✅" if r["triggered"] else "—"
+            val = "" if r["value"] is None else f" ({r['value']})"
+            sig_texts.append(f"{mark} {r['name']}{val}")
+        sig_col = " | ".join(sig_texts) if sig_texts else "No rules evaluated"
+
+        tags = ()
+        if res["status"].startswith("Ready"):
+            tags = ("ready",)
+        elif res["status"].startswith("Error"):
+            tags = ("warn",)
+        else:
+            tags = ("hold",)
+
+        self.tree.insert("", tk.END, values=(res["ticker"], res["price"], res["status"], sig_col), tags=tags)
+
+    def show_help(self):
+        msg = (
+            "How it works:\n"
+            "• RSI cross down: flags when RSI(14) drops back below your threshold (default 70).\n"
+            "• EMA/SMA cross: flags when EMA(fast) crosses below SMA(slow) (default 20 vs 50).\n"
+            "• 52-week drawdown: flags if price is ≥ your % below the 52-week high.\n"
+            "• ATR trailing stop: flags when close falls below (highest 22-day close − N×ATR(14)).\n\n"
+            "Set 'Min signals' to how many rules must trigger to mark 'Ready to SELL'.\n\n"
+            "Tips:\n"
+            "• Use CSV to save/load your watchlist.\n"
+            "• Signals are heuristics, not advice. Always research before acting."
+        )
+        messagebox.showinfo("Help", msg)
+
+if __name__ == "__main__":
+    app = ScreenerApp()
+    app.mainloop()
